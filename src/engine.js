@@ -7577,8 +7577,37 @@ function createAiAgent({ ephemeral = false } = {}) {
       actions: VLM_ACTIONS,
       buildPrompt: () => buildVlmPrompt({ actions: VLM_ACTIONS }),
       request: requestVlmDecision,
-      captureBase64: (a) =>
-        captureAgentPovBase64({
+      captureBase64: async (a) => {
+        // If a sensor mode is active (RGB-D, LiDAR, Compare), capture the
+        // on-screen view which already renders in that mode via renderActiveView.
+        // This sends the agent exactly what's on screen.
+        if (simSensorViewMode !== "rgb" || simCompareView) {
+          // Position camera at agent's POV
+          const [ax, ay, az] = a.getPosition?.() || [0, 0, 0];
+          const yaw = a.group?.rotation?.y ?? 0;
+          const pitch = typeof a.pitch === "number" ? a.pitch : 0;
+          const cp = Math.cos(pitch), sp = Math.sin(pitch);
+          const eyeY = ay + PLAYER_EYE_HEIGHT * 0.9;
+          const prevPos = camera.position.clone();
+          const prevQuat = camera.quaternion.clone();
+          camera.position.set(ax, eyeY, az);
+          camera.lookAt(ax + Math.sin(yaw) * cp, eyeY + sp, az + Math.cos(yaw) * cp);
+          camera.updateProjectionMatrix();
+          camera.updateMatrixWorld(true);
+          // Render the active sensor view
+          renderActiveView();
+          // Capture the canvas
+          const dataUrl = renderer.domElement.toDataURL("image/jpeg", 0.8);
+          // Restore camera
+          camera.position.copy(prevPos);
+          camera.quaternion.copy(prevQuat);
+          camera.updateProjectionMatrix();
+          camera.updateMatrixWorld(true);
+          const idx = dataUrl.indexOf("base64,");
+          return idx !== -1 ? dataUrl.slice(idx + 7) : null;
+        }
+        // Default RGB: use the standard agent POV capture
+        return captureAgentPovBase64({
           agent: a,
           renderer,
           scene,
@@ -7598,7 +7627,8 @@ function createAiAgent({ ephemeral = false } = {}) {
             };
           },
           jpegQuality: 0.8,
-        }),
+        });
+      },
       decideEverySteps: VLM_DEFAULTS.decideEverySteps,
       stepMeters: VLM_DEFAULTS.stepMeters,
       getTask: () => ({ ...agentTask }),
