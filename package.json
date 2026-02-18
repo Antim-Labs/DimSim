@@ -1,0 +1,24 @@
+{
+  "name": "dimsim",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Standalone 3D simulation runner for VLM-agent scenes",
+  "scripts": {
+    "dev": "vite --force",
+    "build": "vite build",
+    "preview": "vite preview",
+    "server": "cd vlm-server && uvicorn main:app --host 127.0.0.1 --port 8000",
+    "setup:server": "pip install -r vlm-server/requirements.txt",
+    "sync": "bash copy-sources.sh",
+    "update-sims": "bash update-sims.sh"
+  },
+  "dependencies": {
+    "@sparkjsdev/spark": "latest",
+    "@dimforge/rapier3d-compat": "^0.14.0",
+    "three": "^0.168.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.10"
+  }
+}
