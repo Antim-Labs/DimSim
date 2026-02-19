@@ -1,0 +1,15 @@
+{
+  "name": "@antim-labs/dimsim",
+  "version": "0.1.0",
+  "exports": "./mod.ts",
+  "tasks": {
+    "start": "deno run --allow-net --allow-read --unstable-net bridge/server.ts",
+    "eval": "deno run --allow-all cli.ts eval"
+  },
+  "imports": {
+    "@dimos/lcm": "./vendor/lcm/mod.ts",
+    "@dimos/msgs": "jsr:@dimos/msgs",
+    "@std/path": "jsr:@std/path",
+    "@std/http": "jsr:@std/http"
+  }
+}

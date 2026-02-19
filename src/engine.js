@@ -334,6 +334,14 @@ const simLidarMultiReturnBtn = document.getElementById("sim-lidar-multireturn");
 // Tagging / annotation state
 let appMode = localStorage.getItem("sparkWorldMode") ?? "sim"; // "sim" | "edit"
 const isStagingEditor = new URLSearchParams(window.location.search).get("staging") === "1";
+
+// ── dimos integration mode ──────────────────────────────────────────────────
+// Activated via ?dimos=1 URL param or window.__dimosMode (injected by Deno bridge server).
+// When active: internal VLM loop disabled, agent pose driven by external /odom,
+// sensor data (RGB, depth, LiDAR) published as LCM packets via WebSocket bridge.
+const _dimosParams = new URLSearchParams(window.location.search);
+const dimosMode = _dimosParams.get("dimos") === "1" || window.__dimosMode === true;
+const dimosScene = _dimosParams.get("scene") || window.__dimosScene || null;
 let currentWorkspace = "scene"; // "scene" | "assetBuilder"
 const workspaceSnapshots = { scene: null, assetBuilder: null };
 const ASSET_LIBRARY_KEY = "sparkWorldAssetLibrary";
@@ -1190,15 +1198,15 @@ function renderRgbdView(enableAutoRange = true) {
   renderer.render(rgbdVizScene, rgbdPostCamera);
 }
 
-function renderRgbdMetricPassOffscreen() {
-  rgbdMetricMaterial.uniforms.uNear.value = camera.near;
-  rgbdMetricMaterial.uniforms.uFar.value = camera.far;
+function renderRgbdMetricPassOffscreen(cam = camera) {
+  rgbdMetricMaterial.uniforms.uNear.value = cam.near;
+  rgbdMetricMaterial.uniforms.uFar.value = cam.far;
   rgbdMetricMaterial.uniforms.uNoiseEnabled.value = rgbdNoiseEnabled ? 1.0 : 0.0;
   rgbdMetricMaterial.uniforms.uSpeckleEnabled.value = rgbdSpeckleEnabled ? 1.0 : 0.0;
   if (!_rgbdNearFarAsserted) {
     console.assert(
-      Math.abs(rgbdMetricMaterial.uniforms.uNear.value - camera.near) < 1e-9 &&
-      Math.abs(rgbdMetricMaterial.uniforms.uFar.value - camera.far) < 1e-9,
+      Math.abs(rgbdMetricMaterial.uniforms.uNear.value - cam.near) < 1e-9 &&
+      Math.abs(rgbdMetricMaterial.uniforms.uFar.value - cam.far) < 1e-9,
       "[RGB-D] Reconstruction near/far must match active camera near/far."
     );
     _rgbdNearFarAsserted = true;
@@ -1228,7 +1236,7 @@ function renderRgbdMetricPassOffscreen() {
   renderer.setRenderTarget(rgbdDepthTarget);
   renderer.setClearColor(0x000000, RGBD_CLEAR_ALPHA);
   renderer.clear(true, true, true);
-  renderer.render(scene, camera);
+  renderer.render(scene, cam);
 
   renderer.setRenderTarget(rgbdMetricTarget);
   renderer.setClearColor(0x000000, RGBD_CLEAR_ALPHA);
@@ -1467,9 +1475,22 @@ function nowNs() {
 }
 
 function pushLidarPoseSample(stampNs = nowNs()) {
-  const pos = camera.getWorldPosition(new THREE.Vector3());
-  const camQuat = camera.getWorldQuaternion(new THREE.Quaternion());
-  const quat = camQuat.clone().multiply(_lidarToCamQuat);
+  let pos, quat;
+  const dimosAgent = dimosMode && window.__dimosAgent;
+  if (dimosAgent) {
+    // In dimos mode, sample from the agent's body position + orientation
+    const [ax, ay, az] = dimosAgent.getPosition?.() || [0, 0, 0];
+    const eyeY = ay + PLAYER_EYE_HEIGHT * 0.9;
+    pos = new THREE.Vector3(ax, eyeY, az);
+    const yaw = dimosAgent.group?.rotation?.y ?? 0;
+    // Build quaternion from agent yaw (rotation about Y axis)
+    const agentQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+    quat = agentQuat.multiply(_lidarToCamQuat);
+  } else {
+    pos = camera.getWorldPosition(new THREE.Vector3());
+    const camQuat = camera.getWorldQuaternion(new THREE.Quaternion());
+    quat = camQuat.clone().multiply(_lidarToCamQuat);
+  }
   _lidarPoseHistory.push({ stampNs, pos, quat });
   const minNs = stampNs - LIDAR_POSE_HISTORY_NS;
   while (_lidarPoseHistory.length > 2 && _lidarPoseHistory[0].stampNs < minNs) {
@@ -2022,7 +2043,7 @@ function resetLidarScanState() {
 }
 
 function updateLidarPointCloud() {
-  if (!rapierWorld || !RAPIER || simSensorViewMode !== "lidar") return;
+  if (!rapierWorld || !RAPIER || (simSensorViewMode !== "lidar" && !dimosMode)) return;
 
   if (_lidarUseKnownGoodDebugCloud) {
     resetLidarScanState();
@@ -7640,8 +7661,9 @@ function createAiAgent({ ephemeral = false } = {}) {
     senseRadius: 3.0,
     walkSpeed: 2.0,
     vlm: {
+      // In dimos mode, VLM is disabled — agent pose is driven externally via /odom.
       // Ephemeral workers auto-enable; manually spawned agents start idle.
-      enabled: true,
+      enabled: dimosMode ? false : true,
       holdPositionWhenIdle: true,
       endpoint,
       model,
@@ -11925,18 +11947,32 @@ function tick() {
     }
   }
 
-  // LiDAR / sensor overlays — only when explicitly enabled
-  if (simSensorViewMode === "lidar" || simCompareView) {
+  // LiDAR / sensor overlays — run when explicitly enabled OR in dimos mode
+  if (simSensorViewMode === "lidar" || simCompareView || dimosMode) {
     lidarVizGroup.visible = true;
     updateLidarPointCloud();
     if (_lidarGeom.drawRange.count <= 0 && _lidarLastNonZeroDrawCount > 0) {
       _lidarGeom.setDrawRange(0, _lidarLastNonZeroDrawCount);
+    }
+    // In dimos mode, hide LiDAR viz from the main scene render — it's only
+    // needed for data capture + the sidebar LiDAR panel renders it separately.
+    if (dimosMode && simSensorViewMode !== "lidar" && !simCompareView) {
+      lidarVizGroup.visible = false;
     }
   } else if (rgbdPcOverlayOnLidar && (simSensorViewMode === "lidar" || simCompareView)) {
     updateRgbdPcOverlayCloud(false);
   }
 
   pushLidarPoseSample();
+
+  // Dimos synchronized sensor capture — runs before render so PiP can reuse textures
+  if (dimosMode && window.__dimosBridge) {
+    const bridge = window.__dimosBridge;
+    if (bridge._connected && bridge._dirty.capture) {
+      bridge._dirty.capture = false;
+      bridge._publishAll();
+    }
+  }
 
   // Agent vision captures
   if (hasPendingCapture()) {
@@ -13306,3 +13342,310 @@ vibeCreatorApi = initVibeCreator({
   // model: "gpt-4.1-2025-04-14",          // OpenAI GPT-4.1
   model: "gemini-3-flash-preview",   // Google Gemini 2.5 Flash
 });
+
+// ── dimos integration mode boot ──────────────────────────────────────────────
+// When dimosMode is active, auto-load a scene and spawn an agent, then connect
+// the LCM bridge so sensor data flows and external /odom drives the agent.
+if (dimosMode) {
+  (async () => {
+    try {
+      // 1. Auto-load scene
+      const sceneName = dimosScene || "hotel-lobby";
+      console.log(`[dimos] Loading scene: ${sceneName}`);
+      const resp = await fetch(`/sims/${sceneName}.json`);
+      if (!resp.ok) throw new Error(`Scene fetch failed: HTTP ${resp.status}`);
+      const sceneJson = await resp.json();
+      await importLevelFromJSON(sceneJson);
+      console.log(`[dimos] Scene loaded: ${sceneName}`);
+
+      // 2. Auto-spawn agent (wait for physics to settle)
+      await new Promise((r) => setTimeout(r, 1500));
+      await ensureRapierLoaded();
+      const agent = createAiAgent({ ephemeral: false });
+      aiAgents.push(agent);
+      // Place agent at a default spawn point
+      const spawnPos = sceneJson.dimosSpawnPoint || { x: 0, y: 0.5, z: 0 };
+      agent.setPosition(spawnPos.x, spawnPos.y, spawnPos.z);
+      // Override the agent's update loop — in dimos mode, movement is driven
+      // by /cmd_vel (Twist velocity commands) from the dimos navigation stack.
+      // We integrate velocity each frame to update the kinematic body position.
+      agent.update = function(dt) {
+        const bridge = window.__dimosBridge;
+        if (bridge) {
+          const vel = bridge.getCmdVel();
+          if (vel.linX !== 0 || vel.linY !== 0 || vel.linZ !== 0 || vel.angY !== 0) {
+            const pos = this.body.translation();
+            const yaw = this.group.rotation.y;
+
+            // Integrate angular velocity (yaw rotation about Y axis)
+            const newYaw = yaw + vel.angY * dt;
+            this.group.rotation.y = newYaw;
+
+            // Integrate linear velocity in the agent's local frame
+            // Forward (linZ in Three.js) is along the agent's facing direction
+            const cosY = Math.cos(newYaw);
+            const sinY = Math.sin(newYaw);
+            const newX = pos.x + (vel.linZ * sinY + vel.linX * cosY) * dt;
+            const newY = pos.y + vel.linY * dt;
+            const newZ = pos.z + (vel.linZ * cosY - vel.linX * sinY) * dt;
+
+            this.body.setNextKinematicTranslation({ x: newX, y: newY, z: newZ });
+          }
+        }
+        this._syncVisual();
+      };
+      console.log(`[dimos] Agent spawned: ${agent.id}`);
+
+      // 3. Set up fast offscreen RGB capture for dimos (no splat warm-up delay)
+      const _dimosCapW = 960, _dimosCapH = 432;
+      const _dimosCapTarget = new THREE.WebGLRenderTarget(_dimosCapW, _dimosCapH, {
+        minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat, depthBuffer: true, stencilBuffer: false,
+      });
+      const _dimosCapCam = new THREE.PerspectiveCamera(80, _dimosCapW / _dimosCapH, camera.near, camera.far);
+      const _dimosCapBuf = new Uint8Array(_dimosCapW * _dimosCapH * 4);
+      const _dimosCapCvs = document.createElement("canvas");
+      _dimosCapCvs.width = _dimosCapW;
+      _dimosCapCvs.height = _dimosCapH;
+      const _dimosCapCtx = _dimosCapCvs.getContext("2d");
+
+      function _dimosCaptureRgb() {
+        const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
+        const yaw = agent.group?.rotation?.y ?? 0;
+        const pitch = typeof agent.pitch === "number" ? agent.pitch : 0;
+        const cp = Math.cos(pitch), sp = Math.sin(pitch);
+        const eyeY = ay + PLAYER_EYE_HEIGHT * 0.9;
+        _dimosCapCam.position.set(ax, eyeY, az);
+        _dimosCapCam.lookAt(ax + Math.sin(yaw)*cp, eyeY + sp, az + Math.cos(yaw)*cp);
+        _dimosCapCam.updateProjectionMatrix();
+        _dimosCapCam.updateMatrixWorld(true);
+
+        const prev = renderer.getRenderTarget();
+        renderer.setRenderTarget(_dimosCapTarget);
+        renderer.render(scene, _dimosCapCam);
+        renderer.setRenderTarget(prev);
+
+        renderer.readRenderTargetPixels(_dimosCapTarget, 0, 0, _dimosCapW, _dimosCapH, _dimosCapBuf);
+        // Flip Y
+        const flipped = new Uint8ClampedArray(_dimosCapW * _dimosCapH * 4);
+        const rowB = _dimosCapW * 4;
+        for (let y = 0; y < _dimosCapH; y++) {
+          flipped.set(_dimosCapBuf.subarray((_dimosCapH-1-y)*rowB, (_dimosCapH-y)*rowB), y*rowB);
+        }
+        _dimosCapCtx.putImageData(new ImageData(flipped, _dimosCapW, _dimosCapH), 0, 0);
+        const dataUrl = _dimosCapCvs.toDataURL("image/jpeg", 0.75);
+        const idx = dataUrl.indexOf("base64,");
+        return idx !== -1 ? dataUrl.slice(idx + 7) : null;
+      }
+
+      // Offscreen depth capture from agent POV (no screen render, no flicker)
+      function _dimosCaptureDepth() {
+        // Position the capture camera at the agent's POV (same as RGB capture)
+        const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
+        const yaw = agent.group?.rotation?.y ?? 0;
+        const pitch = typeof agent.pitch === "number" ? agent.pitch : 0;
+        const cp = Math.cos(pitch), sp = Math.sin(pitch);
+        const eyeY = ay + PLAYER_EYE_HEIGHT * 0.9;
+        _dimosCapCam.position.set(ax, eyeY, az);
+        _dimosCapCam.lookAt(ax + Math.sin(yaw)*cp, eyeY + sp, az + Math.cos(yaw)*cp);
+        _dimosCapCam.updateProjectionMatrix();
+        _dimosCapCam.updateMatrixWorld(true);
+
+        // Render depth offscreen using the agent camera
+        renderRgbdMetricPassOffscreen(_dimosCapCam);
+
+        // Restore render target to screen
+        renderer.setRenderTarget(null);
+
+        // Read back metric depth as Float32Array
+        const depthData = readRgbdMetricDepthFrameMeters();
+        if (!depthData) return null;
+        return {
+          data: depthData,
+          width: rgbdMetricTarget.width,
+          height: rgbdMetricTarget.height,
+        };
+      }
+
+      // 4. Sidebar sensor panel setup (depth + LiDAR canvases)
+      const _dimosSidebarW = 320, _dimosSidebarH = 145;
+      const _dimosDepthCanvas = document.getElementById("agent-depth-canvas");
+      const _dimosLidarCanvas = document.getElementById("agent-lidar-canvas");
+      if (_dimosDepthCanvas) { _dimosDepthCanvas.width = _dimosSidebarW; _dimosDepthCanvas.height = _dimosSidebarH; }
+      if (_dimosLidarCanvas) { _dimosLidarCanvas.width = _dimosSidebarW; _dimosLidarCanvas.height = _dimosSidebarH; }
+      const _dimosDepthCtx = _dimosDepthCanvas?.getContext("2d");
+      const _dimosLidarCtx = _dimosLidarCanvas?.getContext("2d");
+
+      // Small offscreen render targets for sidebar panels
+      const _dimosSidebarDepthTarget = new THREE.WebGLRenderTarget(_dimosSidebarW, _dimosSidebarH, {
+        minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat, depthBuffer: true, stencilBuffer: false,
+      });
+      const _dimosSidebarLidarTarget = new THREE.WebGLRenderTarget(_dimosSidebarW, _dimosSidebarH, {
+        minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat, depthBuffer: true, stencilBuffer: false,
+      });
+      const _dimosSidebarReadBuf = new Uint8Array(_dimosSidebarW * _dimosSidebarH * 4);
+
+      // Helper: render a target, readback, flip Y, draw to 2D canvas
+      function _dimosBlitToCanvas(rt, ctx, w, h) {
+        renderer.readRenderTargetPixels(rt, 0, 0, w, h, _dimosSidebarReadBuf);
+        const flipped = new Uint8ClampedArray(w * h * 4);
+        const rowB = w * 4;
+        for (let y = 0; y < h; y++) {
+          flipped.set(_dimosSidebarReadBuf.subarray((h-1-y)*rowB, (h-y)*rowB), y*rowB);
+        }
+        ctx.putImageData(new ImageData(flipped, w, h), 0, 0);
+      }
+
+      /** Update the sidebar sensor panels (called after capture) */
+      function _dimosUpdateSidebarPanels(rgbBase64) {
+        if (window.__dimosHeadless) return;
+
+        // RGB — set img src
+        if (rgbBase64 && agentShotImgEl) {
+          agentShotImgEl.src = `data:image/jpeg;base64,${rgbBase64}`;
+        }
+
+        // Depth — render colormap to small target, blit to canvas
+        if (_dimosDepthCtx) {
+          const prev = renderer.getRenderTarget();
+          rgbdVizMaterial.uniforms.uGrayMode.value = rgbdVizMode === "gray" ? 1.0 : 0.0;
+          renderer.setRenderTarget(_dimosSidebarDepthTarget);
+          renderer.setClearColor(0x000000, 1);
+          renderer.clear(true, true, true);
+          renderer.render(rgbdVizScene, rgbdPostCamera);
+          _dimosBlitToCanvas(_dimosSidebarDepthTarget, _dimosDepthCtx, _dimosSidebarW, _dimosSidebarH);
+          renderer.setRenderTarget(prev);
+        }
+
+        // LiDAR — render lidar scene from agent POV to small target, blit to canvas
+        if (_dimosLidarCtx) {
+          const prev = renderer.getRenderTarget();
+          // Save/restore scene visibility for lidar-only render
+          const savedSplat = splatMesh ? splatMesh.visible : false;
+          const savedSpark = sparkRendererMesh ? sparkRendererMesh.visible : false;
+          const savedAssets = assetsGroup.visible;
+          const savedPrims = primitivesGroup.visible;
+          const savedLights = lightsGroup.visible;
+          const savedTags = tagsGroup.visible;
+          const savedLidar = lidarVizGroup.visible;
+          const savedOverlay = rgbdPcOverlayGroup.visible;
+          const savedBg = scene.background;
+
+          if (splatMesh) splatMesh.visible = false;
+          if (sparkRendererMesh) sparkRendererMesh.visible = false;
+          assetsGroup.visible = false;
+          primitivesGroup.visible = false;
+          lightsGroup.visible = false;
+          tagsGroup.visible = false;
+          lidarVizGroup.visible = true;
+          rgbdPcOverlayGroup.visible = false;
+          scene.background = RGBD_BG;
+
+          renderer.setRenderTarget(_dimosSidebarLidarTarget);
+          renderer.setClearColor(0x000000, 1);
+          renderer.clear(true, true, true);
+          renderer.render(scene, _dimosCapCam);
+
+          // Restore
+          if (splatMesh) splatMesh.visible = savedSplat;
+          if (sparkRendererMesh) sparkRendererMesh.visible = savedSpark;
+          assetsGroup.visible = savedAssets;
+          primitivesGroup.visible = savedPrims;
+          lightsGroup.visible = savedLights;
+          tagsGroup.visible = savedTags;
+          lidarVizGroup.visible = savedLidar;
+          rgbdPcOverlayGroup.visible = savedOverlay;
+          scene.background = savedBg;
+
+          _dimosBlitToCanvas(_dimosSidebarLidarTarget, _dimosLidarCtx, _dimosSidebarW, _dimosSidebarH);
+          renderer.setRenderTarget(prev);
+        }
+      }
+
+      // 5. Connect dimos bridge
+      let _lastRgbBase64 = null;
+      const { DimosBridge } = await import("./dimos/dimosBridge.ts");
+      const bridge = new DimosBridge({
+        agent,
+        sensorSources: {
+          captureRgb: () => {
+            const b64 = _dimosCaptureRgb();
+            _lastRgbBase64 = b64;
+            return Promise.resolve(b64);
+          },
+          captureDepth: () => _dimosCaptureDepth(),
+          captureLidar: () => {
+            const frames = window.__robovalLidar.getLatestFrames();
+            const src = frames?.deskewed || frames?.raw;
+            if (!src) return null;
+            return { points: src.points, intensity: src.intensity, numPoints: src.points?.length / 3 || 0 };
+          },
+          getOdomPose: () => {
+            const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
+            const yaw = agent.group?.rotation?.y ?? 0;
+            // Convert yaw to quaternion (rotation about Y axis)
+            const qw = Math.cos(yaw / 2);
+            const qy = Math.sin(yaw / 2);
+            return { x: ax, y: ay, z: az, qx: 0, qy, qz: 0, qw };
+          },
+        },
+      });
+
+      // Hook: after _publishAll, update sidebar panels
+      const origPublishAll = bridge._publishAll.bind(bridge);
+      bridge._publishAll = function() {
+        origPublishAll();
+        _dimosUpdateSidebarPanels(_lastRgbBase64);
+      };
+
+      bridge.connect();
+      window.__dimosBridge = bridge;
+      window.__dimosAgent = agent;
+
+      // 6. Connect eval harness (hooks bridge text messages for eval commands)
+      const { EvalHarness } = await import("./dimos/evalHarness.ts");
+      const evalHarness = new EvalHarness({
+        bridge,
+        importLevel: importLevelFromJSON,
+        captureRgb: () => Promise.resolve(_dimosCaptureRgb()),
+        getSceneState: () => ({
+          assets: assets.map(a => ({
+            title: a.title, id: a.id,
+            transform: a.transform?.position
+              ? { x: a.transform.position.x ?? 0, y: a.transform.position.y ?? 0, z: a.transform.position.z ?? 0 }
+              : undefined,
+          })),
+          primitives: primitives.map(p => ({
+            label: p.name, id: p.id,
+            x: p.transform?.position?.x ?? 0,
+            y: p.transform?.position?.y ?? 0,
+            z: p.transform?.position?.z ?? 0,
+          })),
+          tags: tags.map(t => ({
+            label: t.title, id: t.id,
+            position: t.position || { x: 0, y: 0, z: 0 },
+          })),
+        }),
+        getAgentPose: () => {
+          const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
+          const yaw = agent.group?.rotation?.y ?? 0;
+          const pitch = typeof agent.pitch === "number" ? agent.pitch : 0;
+          return { x: ax, y: ay, z: az, yaw, pitch };
+        },
+      });
+      window.__evalHarness = evalHarness;
+
+      // Auto-open Agent Vision panel in dimos mode
+      if (!window.__dimosHeadless) {
+        const visionDetails = document.getElementById("agent-vision-details");
+        if (visionDetails) visionDetails.setAttribute("open", "");
+      }
+
+      console.log("[dimos] Bridge + eval harness connected. Sensor publishing active.");
+    } catch (err) {
+      console.error("[dimos] Initialization failed:", err);
+    }
+  })();
+}

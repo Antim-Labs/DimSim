@@ -3040,3 +3040,23 @@ input[type="color"]::-webkit-color-swatch { border: none; border-radius: 2px; }
   outline: none;
   border-color: var(--accent-primary);
 }
+
+/* ============================================================================
+   Agent Sensor Panels (sidebar)
+   ============================================================================ */
+.agent-sensor-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 4px 8px 2px;
+}
+
+.agent-sensor-canvas {
+  width: 100%;
+  height: auto;
+  display: block;
+  background: #000;
+  aspect-ratio: 2.2 / 1;
+}

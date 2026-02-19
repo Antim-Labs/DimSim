@@ -10,7 +10,10 @@
     "preview": "vite preview",
     "server": "node server.js",
     "sync": "bash copy-sources.sh",
-    "update-sims": "bash update-sims.sh"
+    "update-sims": "bash update-sims.sh",
+    "dimos": "deno run --allow-all dimos-cli/cli.ts eval",
+    "dimos:headless": "deno run --allow-all dimos-cli/cli.ts eval --headless",
+    "dimos:dev": "deno run --allow-all dimos-cli/cli.ts dev"
   },
   "dependencies": {
     "@sparkjsdev/spark": "latest",
