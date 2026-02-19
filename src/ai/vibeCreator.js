@@ -1747,6 +1747,72 @@ export function initVibeCreator(config) {
     }
   }
 
+  function assetLibraryMergeKey(entry) {
+    if (!entry || typeof entry !== "object") return "";
+    if (entry.id) return `id:${entry.id}`;
+    const name = String(entry.name || "").trim().toLowerCase();
+    const prompt = String(entry.prompt || "").trim().toLowerCase();
+    return `np:${name}|${prompt}`;
+  }
+
+  function countTextureDataUrlsInScene(scene) {
+    if (!scene || typeof scene !== "object") return 0;
+    let count = 0;
+    for (const p of scene.primitives || []) {
+      const tex = p?.material?.textureDataUrl;
+      if (typeof tex === "string" && tex.startsWith("data:image/")) count++;
+    }
+    return count;
+  }
+
+  function getAssetRecordRichnessScore(entry) {
+    if (!entry || typeof entry !== "object") return 0;
+    let score = 0;
+    const thumb = entry.thumbnailDataUrl;
+    if (typeof thumb === "string" && thumb.startsWith("data:image/")) {
+      score += Math.min(10, Math.floor(thumb.length / 50000) + 1);
+    }
+    score += countTextureDataUrlsInScene(entry.scene) * 20;
+    if (Array.isArray(entry.states)) {
+      score += entry.states.length;
+      for (const st of entry.states) {
+        score += countTextureDataUrlsInScene(st?.scene || st?.shapeScene) * 20;
+      }
+    }
+    return score;
+  }
+
+  function choosePreferredMergedEntry(localEntry, diskEntry) {
+    if (!localEntry) return diskEntry;
+    if (!diskEntry) return localEntry;
+    const localScore = getAssetRecordRichnessScore(localEntry);
+    const diskScore = getAssetRecordRichnessScore(diskEntry);
+    if (diskScore > localScore) return diskEntry;
+    if (localScore > diskScore) return localEntry;
+    return localEntry;
+  }
+
+  function mergeAssetLibrariesPreferLocal(localList, diskList) {
+    const local = Array.isArray(localList) ? localList : [];
+    const disk = Array.isArray(diskList) ? diskList : [];
+    const mergedByKey = new Map();
+    for (const entry of local) {
+      const key = assetLibraryMergeKey(entry);
+      if (!key) continue;
+      mergedByKey.set(key, entry);
+    }
+    for (const entry of disk) {
+      const key = assetLibraryMergeKey(entry);
+      if (!key) continue;
+      if (!mergedByKey.has(key)) {
+        mergedByKey.set(key, entry);
+      } else {
+        mergedByKey.set(key, choosePreferredMergedEntry(mergedByKey.get(key), entry));
+      }
+    }
+    return [...mergedByKey.values()];
+  }
+
   function compactBlueprintForStorage(scene) {
     const cloned = deepCloneJSON(scene || { tags: [], primitives: [], lights: [], groups: [] });
   // Keep texture payloads unless they are extremely large.
@@ -1764,8 +1830,8 @@ export function initVibeCreator(config) {
 
   function compactThumbnailForStorage(dataUrl) {
     if (typeof dataUrl !== "string") return "";
-    // Keep thumbnails lightweight to avoid localStorage quota pressure.
-    return dataUrl.length > 160000 ? "" : dataUrl;
+    // Keep thumbnails unless they are extremely large.
+    return dataUrl.length > 1500000 ? "" : dataUrl;
   }
 
   function compactLibraryEntry(entry) {
@@ -1792,22 +1858,24 @@ export function initVibeCreator(config) {
   }
 
   function writeAssetLibrary(list) {
-  const fullList = Array.isArray(list) ? list : [];
-  let attempt = fullList.map(compactLibraryEntry);
-    // Keep the most recent entries first when trimming.
+    const fullList = Array.isArray(list) ? list : [];
+    // Use the editor's canonical write function if available — single source of truth.
+    if (typeof config.writeAssetLibrary === "function") {
+      config.writeAssetLibrary(fullList);
+      return true;
+    }
+    let attempt = fullList.map(compactLibraryEntry);
     attempt = attempt.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
     const MAX_ITEMS = 30;
     if (attempt.length > MAX_ITEMS) attempt = attempt.slice(-MAX_ITEMS);
     while (attempt.length > 0) {
       try {
         localStorage.setItem(ASSET_LIBRARY_KEY, JSON.stringify(attempt));
-      // Persist FULL library to disk (not compacted copy).
-      _persistToDisk(fullList);
+        _persistToDisk(fullList);
         return true;
       } catch (err) {
         const msg = String(err?.name || err?.message || err);
         if (!/QuotaExceededError/i.test(msg)) throw err;
-        // Drop oldest entry and retry until it fits.
         attempt.shift();
       }
     }
@@ -1826,7 +1894,10 @@ export function initVibeCreator(config) {
 
   function upsertAssetLibraryFromRecord(record) {
     const list = readAssetLibrary();
-    const existingIdx = list.findIndex((x) => x.name === record.name && x.prompt === record.prompt);
+    const existingIdx = list.findIndex((x) => x.id && record.id && x.id === record.id);
+    const fallbackIdx = existingIdx >= 0
+      ? existingIdx
+      : list.findIndex((x) => x.name === record.name && x.prompt === record.prompt);
     const entry = {
       id: record.id,
       name: record.name,
@@ -1840,7 +1911,7 @@ export function initVibeCreator(config) {
       actions: Array.isArray(record.actions) ? record.actions : undefined,
       pickable: record.pickable === true,
     };
-    if (existingIdx >= 0) list[existingIdx] = entry;
+    if (fallbackIdx >= 0) list[fallbackIdx] = entry;
     else list.push(entry);
     const ok = writeAssetLibrary(list);
     if (!ok) {
@@ -1848,8 +1919,8 @@ export function initVibeCreator(config) {
     }
   }
 
-  function loadAssetLibraryIntoState() {
-    const list = readAssetLibrary();
+  function loadAssetLibraryIntoState(sourceList = null) {
+    const list = Array.isArray(sourceList) ? sourceList : readAssetLibrary();
     libraryAssets.length = 0;
     for (const item of list) {
       const stateList = Array.isArray(item.states) ? item.states : [];
@@ -1866,6 +1937,9 @@ export function initVibeCreator(config) {
         currentStateId: curStateId,
         actions: Array.isArray(item.actions) ? item.actions : [],
         pickable: item.pickable === true,
+        bumpable: item.bumpable === true,
+        bumpResponse: Number.isFinite(item.bumpResponse) ? Number(item.bumpResponse) : 0.9,
+        bumpDamping: Number.isFinite(item.bumpDamping) ? Number(item.bumpDamping) : 0.9,
         blueprint: validateScene(sceneFromState || item.scene || { tags: [], primitives: [], lights: [], groups: [] }),
       });
     }
@@ -1890,6 +1964,47 @@ export function initVibeCreator(config) {
     return byScore[0]?.a || null;
   }
 
+  const DEFAULT_ASSET_PLACEHOLDER = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='256' height='256' viewBox='0 0 256 256'%3E%3Crect width='256' height='256' fill='%230b0d11'/%3E%3Cg stroke='%236b7280' stroke-width='10' stroke-linecap='round'%3E%3Cpath d='M46 200 L92 110 L138 200 Z' fill='none'/%3E%3Crect x='140' y='128' width='62' height='62' fill='none'/%3E%3Ccircle cx='92' cy='96' r='22' fill='none'/%3E%3C/g%3E%3C/svg%3E";
+
+  function getSceneForAssetThumbnail(asset) {
+    if (!asset || typeof asset !== "object") return null;
+    const states = Array.isArray(asset.states) ? asset.states : [];
+    const currentStateId = asset.currentStateId || states[0]?.id || null;
+    const st = states.find((s) => s.id === currentStateId) || states[0] || null;
+    return st?.scene || st?.shapeScene || asset.blueprint || asset.scene || null;
+  }
+
+  function deriveAssetThumbnailDataUrl(asset) {
+    const scene = getSceneForAssetThumbnail(asset);
+    if (!scene || typeof scene !== "object") return DEFAULT_ASSET_PLACEHOLDER;
+    const primitives = Array.isArray(scene.primitives) ? scene.primitives : [];
+    const colors = [];
+    for (const p of primitives) {
+      const c = p?.material?.color;
+      if (typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c) && !colors.includes(c)) colors.push(c);
+      if (colors.length >= 3) break;
+    }
+    const c1 = colors[0] || "#374151";
+    const c2 = colors[1] || "#4b5563";
+    const c3 = colors[2] || "#6b7280";
+    const label = String(asset?.name || "Asset").trim().slice(0, 1).toUpperCase() || "A";
+    const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='256' height='256' viewBox='0 0 256 256'>
+<defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0%' stop-color='${c1}'/><stop offset='100%' stop-color='${c2}'/></linearGradient></defs>
+<rect width='256' height='256' fill='url(#g)'/>
+<circle cx='196' cy='58' r='26' fill='${c3}' fill-opacity='0.75'/>
+<rect x='34' y='132' width='96' height='70' rx='12' fill='${c3}' fill-opacity='0.6'/>
+<path d='M132 196 L178 96 L222 196 Z' fill='none' stroke='rgba(255,255,255,0.55)' stroke-width='8' stroke-linecap='round'/>
+<text x='24' y='48' fill='rgba(255,255,255,0.9)' font-size='32' font-family='Inter,Arial,sans-serif' font-weight='700'>${escHtml(label)}</text>
+</svg>`;
+    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  }
+
+  function getAssetCardThumbnail(asset) {
+    const thumb = asset?.thumbnailDataUrl;
+    if (typeof thumb === "string" && thumb.startsWith("data:image/")) return thumb;
+    return deriveAssetThumbnailDataUrl(asset);
+  }
+
   function renderStagedAssets() {
     if (!ui.assetList) return;
     if (libraryAssets.length === 0) {
@@ -1898,7 +2013,7 @@ export function initVibeCreator(config) {
     }
     ui.assetList.innerHTML = libraryAssets.map((a, idx) => `
       <div class="vibe-asset-item" data-asset-id="${a.id}" draggable="true">
-        <img class="vibe-asset-thumb" src="${escHtml(a.thumbnailDataUrl || "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='256' height='256' viewBox='0 0 256 256'%3E%3Crect width='256' height='256' fill='%230b0d11'/%3E%3Cg stroke='%236b7280' stroke-width='10' stroke-linecap='round'%3E%3Cpath d='M46 200 L92 110 L138 200 Z' fill='none'/%3E%3Crect x='140' y='128' width='62' height='62' fill='none'/%3E%3Ccircle cx='92' cy='96' r='22' fill='none'/%3E%3C/g%3E%3C/svg%3E")}" alt="${escHtml(a.name || `Asset ${idx + 1}`)}" loading="lazy" />
+        <img class="vibe-asset-thumb" src="${escHtml(getAssetCardThumbnail(a))}" alt="${escHtml(a.name || `Asset ${idx + 1}`)}" loading="lazy" />
         <div class="vibe-asset-item-head">
           <span class="vibe-asset-name">${escHtml(a.name || `Asset ${idx + 1}`)}</span>
           <button type="button" class="vibe-btn vibe-asset-edit" title="Open in Asset Builder">Edit</button>
@@ -2240,11 +2355,26 @@ export function initVibeCreator(config) {
         const placed = offsetScene(record.blueprint, 0, 0);
         await importLevel(placed);
       }
-      if (!skipPlacement && !headless && typeof captureAssetThumbnail === "function") {
+      if (typeof captureAssetThumbnail === "function") {
         try {
+          // For headless/skipped placement, temporarily import the scene to capture a thumbnail
+          if (headless || skipPlacement) {
+            const tempScene = offsetScene(record.blueprint, 0, 0);
+            await importLevel(tempScene);
+          }
           const thumb = await captureAssetThumbnail();
           if (typeof thumb === "string" && thumb.startsWith("data:image/")) {
             record.thumbnailDataUrl = thumb;
+          }
+        } catch {}
+      }
+      // Fallback thumbnail path if dedicated thumbnail capture failed.
+      if ((!record.thumbnailDataUrl || !record.thumbnailDataUrl.startsWith("data:image/"))
+        && typeof captureScreenshot === "function") {
+        try {
+          const shot = await captureScreenshot();
+          if (typeof shot === "string" && shot.startsWith("data:image/")) {
+            record.thumbnailDataUrl = shot;
           }
         } catch {}
       }
@@ -2868,22 +2998,39 @@ export function initVibeCreator(config) {
     await insertApprovedAsset(asset, { preferAnchor: true, clientX: e.clientX, clientY: e.clientY });
   });
   canvasEl?.addEventListener("dragend", () => { draggedAssetId = null; });
-  // On startup: if localStorage is empty, try to restore from disk
+  // On startup: merge disk records without clobbering fresher local edits.
   (async function restoreFromDisk() {
-    const existing = readAssetLibrary();
-    if (existing.length > 0) return; // already have data
     const baseUrl = (endpoint || "").replace("/vlm/decision", "");
     try {
       const res = await fetch(`${baseUrl}/vlm/asset-library`);
-      if (!res.ok) return;
-      const data = await res.json();
-      if (Array.isArray(data.assets) && data.assets.length > 0) {
-        localStorage.setItem(ASSET_LIBRARY_KEY, JSON.stringify(data.assets));
-        console.log(`[VibeCreator] Restored ${data.assets.length} assets from disk.`);
-        loadAssetLibraryIntoState();
-        renderStagedAssets();
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.assets) && data.assets.length > 0) {
+          const localAssets = readAssetLibrary();
+          const merged = localAssets.length > 0
+            ? mergeAssetLibrariesPreferLocal(localAssets, data.assets)
+            : data.assets;
+          const mergedRaw = JSON.stringify(merged);
+          const localRaw = JSON.stringify(localAssets);
+          if (mergedRaw !== localRaw) {
+            let wroteLocal = false;
+            try {
+              localStorage.setItem(ASSET_LIBRARY_KEY, mergedRaw);
+              wroteLocal = true;
+            } catch (err) {
+              console.warn("[VibeCreator] localStorage restore skipped:", err?.message || err);
+            }
+            console.log(`[VibeCreator] Restored ${merged.length} assets (merged local + disk).`);
+            loadAssetLibraryIntoState(wroteLocal ? null : merged);
+            renderStagedAssets();
+          }
+          // If disk was stale, push the merged canonical list back.
+          if (mergedRaw !== JSON.stringify(data.assets)) {
+            writeAssetLibrary(merged);
+          }
+        }
       }
-    } catch { /* server offline — that's fine */ }
+    } catch { /* server offline — fall back to localStorage */ }
   })();
   loadAssetLibraryIntoState();
   renderStagedAssets();
@@ -2892,8 +3039,9 @@ export function initVibeCreator(config) {
     loadAssetLibraryIntoState();
     renderStagedAssets();
   });
-  window.addEventListener("asset-library-updated", () => {
-    loadAssetLibraryIntoState();
+  window.addEventListener("asset-library-updated", (ev) => {
+    const updated = ev?.detail?.assets;
+    loadAssetLibraryIntoState(Array.isArray(updated) ? updated : null);
     renderStagedAssets();
   });
 

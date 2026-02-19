@@ -13,14 +13,14 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 
-// SparkJS (dynamic import so we can install a fetch shim before its WASM initializes)
-let Spark = null;
-let SplatMesh = null;
-let SparkRenderer = null;
-let sparkRendererMesh = null;
 let threeRendererRef = null;
 let threeSceneRef = null;
+// Splat/Spark stubs — variables kept so guarded references don't crash.
+// SparkJS has been removed; these are always null.
+let sparkRendererMesh = null;
 let sparkNeedsUpdate = false;
+let splatMesh = null;
+let isLoadedSplat = false;
 let RAPIER = null;
 let _rapierInitPromise = null;
 let rapierWorld = null;
@@ -43,174 +43,12 @@ const PLAYER_RADIUS = 0.12;
 const PLAYER_HALF_HEIGHT = 0.25;
 const PLAYER_EYE_HEIGHT = PLAYER_HALF_HEIGHT + PLAYER_RADIUS + 0.2; // camera above body origin
 
-function installSparkWorkerBlobShim() {
-  // Spark builds an inline worker by doing: new Blob([jsContent], {type:"text/javascript"})
-  // In our environment, the generated jsContent contains an invalid fragment:
-  //   `module_or_path = "data:...==", self.location.href);`
-  // which throws `Unexpected token ')'` when the worker parses it.
-  // We patch Blob before importing Spark so we can sanitize that string on the fly.
-  const g = globalThis;
-  if (g.__sparkBlobShimInstalled) return;
-  if (typeof g.Blob !== "function") return;
-  const OriginalBlob = g.Blob;
-
-  class PatchedBlob extends OriginalBlob {
-    constructor(parts = [], options) {
-      try {
-        if (
-          Array.isArray(parts) &&
-          parts.length === 1 &&
-          typeof parts[0] === "string" &&
-          parts[0].includes(", self.location.href);")
-        ) {
-          // The worker source is real JS, so it contains real newlines (not literal "\\n").
-          // Patch both LF and CRLF variants.
-          parts = [
-            parts[0]
-              .split(", self.location.href);\r\n")
-              .join(";\r\n")
-              .split(", self.location.href);\n")
-              .join(";\n"),
-          ];
-        }
-      } catch {
-        // ignore and fall back
-      }
-      super(parts, options);
-    }
-  }
-
-  g.Blob = PatchedBlob;
-  g.__sparkBlobShimInstalled = true;
-}
-
-function installSparkFetchShim() {
-  // Spark's ESM bundle embeds WASM as a `data:application/wasm;base64,...` URL.
-  // In Vite dev, we sometimes see that `fetch()` gets called with a *path* like:
-  //   http://localhost:5173/node_modules/@sparkjsdev/spark/dist/data:application/wasm;base64,...
-  // which the dev server rejects (431) due to the gigantic URL.
-  //
-  // We rewrite those back into a real `data:` URL before the request is made.
-  const originalFetch = globalThis.fetch?.bind(globalThis);
-  if (!originalFetch) return;
-  if (globalThis.__sparkFetchShimInstalled) return;
-  globalThis.__sparkFetchShimInstalled = true;
-
-  globalThis.fetch = (input, init) => {
-    try {
-      const url =
-        typeof input === "string"
-          ? input
-          : input instanceof URL
-            ? input.href
-            : input && typeof input === "object" && "url" in input
-              ? input.url
-              : null;
-
-      if (typeof url === "string") {
-        // Fix the "data:application/wasm" path issue
-        // Vite might have URL-encoded the data string in the path
-        let cleanUrl = url;
-        try {
-          cleanUrl = decodeURIComponent(url);
-        } catch {}
-
-        // IMPORTANT: Do NOT trigger on worker/data:text/javascript URLs (they embed the wasm
-        // data URL string inside their JS payload, which would make us return WASM bytes
-        // for a JS request -> "Unexpected token" when the browser parses it).
-        if (cleanUrl.startsWith("data:text/javascript")) return originalFetch(input, init);
-        if (cleanUrl.startsWith("blob:")) return originalFetch(input, init);
-
-        // Only intercept actual WASM URLs:
-        // - direct data URL (startsWith)
-        // - devserver path like ".../dist/data:application/wasm;base64,...." (contains "/data:application/wasm")
-        const marker = "data:application/wasm;base64,";
-        const idx =
-          cleanUrl.startsWith(marker) ? 0 : cleanUrl.indexOf("/" + marker) !== -1 ? cleanUrl.indexOf("/" + marker) + 1 : -1;
-        if (idx !== -1) {
-          try {
-            console.log("Fetch shim: intercepting WASM data URL");
-            let base64 = cleanUrl.slice(idx + marker.length);
-            const qIdx = base64.indexOf("?");
-            if (qIdx !== -1) base64 = base64.slice(0, qIdx);
-            base64 = base64.replace(/[\s\r\n]+/g, "");
-            const binaryString = atob(base64);
-            const len = binaryString.length;
-            const bytes = new Uint8Array(len);
-            for (let i = 0; i < len; i++) {
-              bytes[i] = binaryString.charCodeAt(i);
-            }
-            return Promise.resolve(
-              new Response(bytes, { headers: { "Content-Type": "application/wasm" } })
-            );
-          } catch (decodeErr) {
-            console.error("Fetch shim: failed to decode base64 WASM", decodeErr);
-            return originalFetch(cleanUrl.slice(idx), init);
-          }
-        }
-      }
-    } catch (err) {
-      console.error("Fetch shim error:", err);
-    }
-    return originalFetch(input, init);
-  };
-}
-
-async function ensureSparkLoaded() {
-  if (SplatMesh) return;
-  installSparkWorkerBlobShim();
-  installSparkFetchShim();
-  try {
-    Spark = await import("@sparkjsdev/spark");
-    // Work around rare cases where the inline worker blob fails to parse under some bundlers.
-    // Disabling the worker pool forces Spark to do parsing on the main thread.
-    // (If unsupported, this is a no-op.)
-    try {
-      if (typeof Spark.setWorkerPool === "function") {
-        Spark.setWorkerPool(0);
-      }
-    } catch {
-      // ignore
-    }
-    SplatMesh = Spark.SplatMesh;
-    SparkRenderer = Spark.SparkRenderer;
-    // Ensure Spark's global/static GPU/WASM state is ready before we start creating meshes.
-    try {
-      if (typeof SplatMesh?.staticInitialize === "function") {
-        await SplatMesh.staticInitialize();
-      }
-    } catch {
-      // ignore
-    }
-  } catch (err) {
-    console.error("Failed to load SparkJS:", err);
-    setStatus(`Error loading SparkJS: ${err.message}`);
-    throw err;
-  }
-  if (!SplatMesh) {
-    const msg = "SparkJS loaded but SplatMesh export was not found.";
-    console.error(msg);
-    setStatus(msg);
-    throw new Error(msg);
-  }
-}
-
-function ensureSparkRendererAttached() {
-  if (!SparkRenderer || sparkRendererMesh) return;
-  if (!threeRendererRef || !threeSceneRef) return;
-  // SparkRenderer compiles/accumulates splats found in the scene via onBeforeRender.
-  sparkRendererMesh = new SparkRenderer({ renderer: threeRendererRef });
-  sparkRendererMesh.frustumCulled = false;
-  sparkRendererMesh.renderOrder = 999; // draw last
-  threeSceneRef.add(sparkRendererMesh);
-}
-
 const canvas = document.getElementById("c");
 const fileInput = document.getElementById("file-input");
 const statusEl = document.getElementById("status");
 const resetBtn = document.getElementById("reset");
-const modeEditBtn = document.getElementById("mode-edit");
-const modeSimBtn = document.getElementById("mode-sim");
+const modeEditBtn = null;
+const modeSimBtn = null;
 const overlayEl = document.getElementById("overlay");
 const simPanelCollapseBtn = document.getElementById("sim-panel-collapse");
 const simPanelOpenBtn = document.getElementById("sim-panel-open");
@@ -439,6 +277,7 @@ const assetEditStatesSelectedBtn = document.getElementById("asset-edit-states-se
 const assetDuplicateSelectedBtn = document.getElementById("asset-duplicate-selected");
 const assetCastShadowEl = document.getElementById("asset-cast-shadow");
 const assetReceiveShadowEl = document.getElementById("asset-receive-shadow");
+const assetSelectedPickableEl = document.getElementById("asset-selected-pickable");
 const assetBumpableEl = document.getElementById("asset-bumpable");
 const assetBumpControlsEl = document.getElementById("asset-bump-controls");
 const assetBumpResponseEl = document.getElementById("asset-bump-response");
@@ -501,6 +340,8 @@ const ASSET_LIBRARY_KEY = "sparkWorldAssetLibrary";
 let builderEditingAssetId = null;
 let builderEditingStateId = null;
 let builderShowTypeChoice = false;
+let builderPrimarySaveBtn = null;
+let assetLibraryRuntimeCache = null;
 let assetBuilderGrid = null;
 let simSensorViewMode = "rgb"; // "rgb" | "rgbd" | "lidar"
 let simCompareView = false; // show RGB + RGB-D + LiDAR side-by-side
@@ -737,7 +578,7 @@ const _tmpV3 = new THREE.Vector3();
 let agentCameraFollow = false;
 let _agentFollowInitialized = false;
 
-// Agent task state (one active instruction at a time).
+// Agent task state — per-agent tasks for parallel execution.
 let agentTask = {
   active: false,
   instruction: "",
@@ -746,6 +587,19 @@ let agentTask = {
   finishedReason: "",
   lastSummary: "",
 };
+const _agentTasks = new Map(); // agentId -> { active, instruction, startedAt, finishedAt, finishedReason, lastSummary }
+
+function _getAgentTask(agentId) {
+  return _agentTasks.get(agentId) || agentTask;
+}
+
+function _setAgentTask(agentId, task) {
+  _agentTasks.set(agentId, task);
+  // Keep global agentTask in sync with the most recent active task (for UI compat)
+  if (task.active) {
+    agentTask = { ...task };
+  }
+}
 let selectedAgentInspectorId = null;
 const agentInspectorStateById = new Map(); // id -> { shot, request, response }
 let agentCameraFollowId = null;
@@ -2608,9 +2462,6 @@ const keys = {
   down: false,
 };
 
-let isLoadedSplat = false;
-let splatMesh = null;
-
 function setStatus(msg) {
   if (statusEl) statusEl.textContent = msg || "";
   if (statusSimEl) statusSimEl.textContent = msg || "";
@@ -3307,7 +3158,6 @@ function updateAgentCameraFollow(dt) {
 async function startAgentTask(instruction, { autoPool = true, targetAgentId = null } = {}) {
   const text = String(instruction || "").trim();
   if (!text) return;
-  if (agentTask.active) return;
 
   // Editor mode: spin up a small worker pool for parallelized task execution.
   if (appMode === "edit" && autoPool && !targetAgentId) {
@@ -3317,43 +3167,70 @@ async function startAgentTask(instruction, { autoPool = true, targetAgentId = nu
       return;
     }
   }
-  const target = targetAgentId ? getAgentById(targetAgentId) : null;
-  if (targetAgentId && !target) return;
-  agentTaskTargetId = target?.id || null;
-  agentTask = {
+
+  const now = Date.now();
+  const taskState = {
     active: true,
     instruction: text,
-    startedAt: Date.now(),
+    startedAt: now,
     finishedAt: 0,
     finishedReason: "",
     lastSummary: "",
   };
-  for (const a of aiAgents) {
-    const enabledForTask = appMode !== "edit" || !agentTaskTargetId || a.id === agentTaskTargetId;
-    if (enabledForTask) a._taskStartedAt = agentTask.startedAt;
-    if (a?.vlm) a.vlm.enabled = enabledForTask;
+
+  // Determine which agents get this task
+  const target = targetAgentId ? getAgentById(targetAgentId) : null;
+  agentTaskTargetId = target?.id || null;
+  const targets = target ? [target] : aiAgents;
+
+  for (const a of targets) {
+    _setAgentTask(a.id, { ...taskState });
+    a._taskStartedAt = now;
+    if (a?.vlm) a.vlm.enabled = true;
   }
-  agentUiPush(`${new Date().toLocaleTimeString()}\nTASK START\n${text}`);
+
+  agentUiPush(`${new Date().toLocaleTimeString()}\nTASK START\n${text}${target ? ` [${target.id}]` : ` [${targets.length} agents]`}`);
   renderAgentTaskUi();
   
   // Follow agent camera only in simulation mode.
   if (appMode === "sim") enableAgentCameraFollow();
 }
 
-function endAgentTask(reason = "manual") {
-  if (!agentTask.active) return;
-  agentTask.active = false;
-  agentTask.finishedAt = Date.now();
-  agentTask.finishedReason = reason;
-  agentUiPush(`${new Date().toLocaleTimeString()}\nTASK END (${reason})`);
-  agentTaskTargetId = null;
-  for (const a of aiAgents) {
-    if (a?.vlm) a.vlm.enabled = true;
+function endAgentTask(reason = "manual", agentId = null) {
+  if (agentId) {
+    // End task for a specific agent
+    const task = _agentTasks.get(agentId);
+    if (task?.active) {
+      task.active = false;
+      task.finishedAt = Date.now();
+      task.finishedReason = reason;
+      _agentTasks.set(agentId, task);
+    }
+    agentUiPush(`${new Date().toLocaleTimeString()}\nTASK END (${reason}) [${agentId}]`);
+  } else {
+    // End all tasks
+    for (const [id, task] of _agentTasks) {
+      if (task.active) {
+        task.active = false;
+        task.finishedAt = Date.now();
+        task.finishedReason = reason;
+      }
+    }
+    agentTask.active = false;
+    agentTask.finishedAt = Date.now();
+    agentTask.finishedReason = reason;
+    agentUiPush(`${new Date().toLocaleTimeString()}\nTASK END ALL (${reason})`);
   }
+  agentTaskTargetId = null;
+
+  // Check if any agent still has an active task
+  const anyActive = [..._agentTasks.values()].some((t) => t.active);
+  if (!anyActive) {
+    agentTask.active = false;
+    disableAgentCameraFollow();
+  }
+
   renderAgentTaskUi();
-  
-  // Return camera to player
-  disableAgentCameraFollow();
 
   // Editor worker agents are ephemeral: complete/stop -> vanish.
   if (appMode === "edit") {
@@ -3621,6 +3498,7 @@ function selectAsset(id) {
   const selAsset = getSelectedAsset();
   if (assetCastShadowEl) assetCastShadowEl.checked = selAsset?.castShadow === true;
   if (assetReceiveShadowEl) assetReceiveShadowEl.checked = selAsset?.receiveShadow === true;
+  if (assetSelectedPickableEl) assetSelectedPickableEl.checked = selAsset?.pickable === true;
   if (assetBumpableEl) assetBumpableEl.checked = selAsset?.bumpable === true;
   if (assetBumpControlsEl) assetBumpControlsEl.classList.toggle("hidden", !(selAsset?.bumpable));
   if (assetBumpResponseEl) assetBumpResponseEl.value = String(selAsset?.bumpResponse ?? 0.9);
@@ -3679,7 +3557,7 @@ function normalizeShapeStateScene(sceneLike) {
   };
 }
 
-function buildShapeStateRoot(state, assetId) {
+function buildShapeStateRoot(state, assetId, fixedPivotCenter = null) {
   const sceneState = normalizeShapeStateScene(state?.scene || state?.shapeScene);
   const root = new THREE.Group();
   const primMap = new Map();
@@ -3711,7 +3589,31 @@ function buildShapeStateRoot(state, assetId) {
       subgroup.add(child);
     }
   }
+
+  // Re-center: move the pivot to the bounding-box center so the transform
+  // gizmo appears on the asset rather than at an arbitrary offset.
+  root.updateMatrixWorld(true);
+  const bbox = new THREE.Box3().setFromObject(root);
+  if (!bbox.isEmpty()) {
+    const autoCenter = bbox.getCenter(new THREE.Vector3());
+    const center = fixedPivotCenter ? fixedPivotCenter.clone() : autoCenter;
+    for (const child of root.children) {
+      child.position.sub(center);
+    }
+    root.position.copy(center);
+    root.userData._pivotCenter = center.clone();
+  }
+
   return root;
+}
+
+function disposeShapeStateRoot(root) {
+  if (!root) return;
+  root.traverse((obj) => {
+    if (!obj?.isMesh) return;
+    obj.geometry?.dispose?.();
+    disposePrimitiveMaterial(obj.material);
+  });
 }
 
 async function instantiateAsset(a) {
@@ -3728,7 +3630,27 @@ async function instantiateAsset(a) {
     : a.states[sId] || a.states.A;
   let root = null;
   if (state?.scene || state?.shapeScene) {
-    root = buildShapeStateRoot(state, a.id);
+    let fixedPivotCenter = null;
+    if (a._shapePivotCenter
+      && Number.isFinite(a._shapePivotCenter.x)
+      && Number.isFinite(a._shapePivotCenter.y)
+      && Number.isFinite(a._shapePivotCenter.z)) {
+      fixedPivotCenter = new THREE.Vector3(a._shapePivotCenter.x, a._shapePivotCenter.y, a._shapePivotCenter.z);
+    } else if (Array.isArray(a.states) && a.states.length > 0) {
+      const anchorState = a.states[0];
+      const anchorRoot = buildShapeStateRoot(anchorState, `${a.id}:anchor`);
+      const anchorCenter = anchorRoot.userData?._pivotCenter;
+      if (anchorCenter) {
+        fixedPivotCenter = anchorCenter.clone();
+        a._shapePivotCenter = { x: anchorCenter.x, y: anchorCenter.y, z: anchorCenter.z };
+      }
+      disposeShapeStateRoot(anchorRoot);
+    }
+    root = buildShapeStateRoot(state, a.id, fixedPivotCenter);
+    const rootCenter = root.userData?._pivotCenter;
+    if (rootCenter && !a._shapePivotCenter) {
+      a._shapePivotCenter = { x: rootCenter.x, y: rootCenter.y, z: rootCenter.z };
+    }
   } else if (state?.dataBase64) {
     const buf = arrayBufferFromBase64(state.dataBase64);
     const url = URL.createObjectURL(new Blob([buf], { type: "model/gltf-binary" }));
@@ -5998,7 +5920,8 @@ function duplicatePrimitive(id) {
 function updatePrimitiveMaterial(primId) {
   const prim = primitives.find((p) => p.id === primId);
   if (!prim) return;
-  const mesh = primitivesGroup.getObjectByName(`prim:${prim.id}`);
+  const mesh = primitivesGroup.getObjectByName(`prim:${prim.id}`)
+    || (groupPivot ? groupPivot.getObjectByName(`prim:${prim.id}`) : null);
   if (!mesh) return;
   disposePrimitiveMaterial(mesh.material);
   mesh.material = createPrimitiveMaterial(prim.material);
@@ -6008,7 +5931,8 @@ function updatePrimitiveMaterial(primId) {
 function updatePrimitiveDimensions(primId) {
   const prim = primitives.find((p) => p.id === primId);
   if (!prim) return;
-  const mesh = primitivesGroup.getObjectByName(`prim:${prim.id}`);
+  const mesh = primitivesGroup.getObjectByName(`prim:${prim.id}`)
+    || (groupPivot ? groupPivot.getObjectByName(`prim:${prim.id}`) : null);
   if (!mesh) return;
   mesh.geometry?.dispose();
   mesh.geometry = createPrimitiveGeometry(prim.type, prim.dimensions);
@@ -6430,6 +6354,10 @@ function updateGroupDetailsPanel() {
   const gd = document.createElement("div");
   gd.id = "group-details";
   gd.className = "prim-props";
+  // Sample first child's material for initial slider values
+  const firstChild = primitives.find((p) => g.children.includes(p.id));
+  const fm = firstChild?.material || {};
+
   gd.innerHTML = `
     <details class="dt-section" open>
       <summary class="dt-header">Group</summary>
@@ -6444,10 +6372,47 @@ function updateGroupDetailsPanel() {
         </div>
       </div>
     </details>
+    <details class="dt-section" open>
+      <summary class="dt-header">Group Material</summary>
+      <div class="dt-body">
+        <div style="font-size:11px;color:var(--text-tertiary);margin-bottom:6px;">Changes apply to all ${g.children.length} shapes.</div>
+        <div style="font-size:12px;font-weight:600;margin-bottom:4px;">Presets</div>
+        <div class="dt-actions" style="flex-wrap:wrap;gap:5px;margin-bottom:8px;">
+          ${["plastic","ceramic","rubber","fabric","velvet","cushion","glass","mirror","metal","concrete"].map(
+            (p) => `<button data-grp-preset="${p}" class="tb-btn tb-muted" type="button">${p.charAt(0).toUpperCase() + p.slice(1)}</button>`
+          ).join("")}
+        </div>
+        <div class="dt-row"><label class="prop-label">Color</label><input id="grp-color" type="color" value="${fm.color || "#808080"}" /></div>
+        <div class="slider"><span class="slider-label">Softness</span><input id="grp-roughness" type="range" min="0" max="1" step="0.05" value="${fm.softness ?? fm.roughness ?? 0.7}" /><span id="grp-roughness-val" class="slider-value">${(fm.softness ?? fm.roughness ?? 0.7).toFixed(2)}</span></div>
+        <div class="slider"><span class="slider-label">Hardness</span><input id="grp-hardness" type="range" min="0" max="1" step="0.01" value="${fm.hardness ?? 0}" /><span id="grp-hardness-val" class="slider-value">${(fm.hardness ?? 0).toFixed(2)}</span></div>
+        <div class="slider"><span class="slider-label">Fluffiness</span><input id="grp-fluffiness" type="range" min="0" max="1" step="0.01" value="${fm.fluffiness ?? 0}" /><span id="grp-fluffiness-val" class="slider-value">${(fm.fluffiness ?? 0).toFixed(2)}</span></div>
+        <div class="slider"><span class="slider-label">Metal Look</span><input id="grp-metalness" type="range" min="0" max="1" step="0.05" value="${fm.metalness ?? 0}" /><span id="grp-metalness-val" class="slider-value">${(fm.metalness ?? 0).toFixed(2)}</span></div>
+        <div class="slider"><span class="slider-label">Transparency</span><input id="grp-opacity" type="range" min="0.05" max="1" step="0.01" value="${fm.opacity ?? 1}" /><span id="grp-opacity-val" class="slider-value">${(fm.opacity ?? 1).toFixed(2)}</span></div>
+        <div class="slider"><span class="slider-label">Glassiness</span><input id="grp-transmission" type="range" min="0" max="1" step="0.01" value="${fm.transmission ?? 0}" /><span id="grp-transmission-val" class="slider-value">${(fm.transmission ?? 0).toFixed(2)}</span></div>
+        <div class="dt-row"><label class="prop-label">Glow Color</label><input id="grp-emissive" type="color" value="${fm.emissive || "#000000"}" /></div>
+        <div class="slider"><span class="slider-label">Glow Strength</span><input id="grp-emissive-intensity" type="range" min="0" max="5" step="0.05" value="${fm.emissiveIntensity ?? 0}" /><span id="grp-emissive-intensity-val" class="slider-value">${(fm.emissiveIntensity ?? 0).toFixed(2)}</span></div>
+        <div class="dt-row"><label class="prop-label">Texture</label>
+          <label class="tb-btn tb-muted tb-file-label"><input id="grp-texture" type="file" accept="image/*" /><span id="grp-texture-label">${fm.textureDataUrl ? "Change" : "Upload"}</span></label>
+          <button id="grp-texture-clear" type="button" class="tb-btn tb-muted">Clear</button>
+        </div>
+      </div>
+    </details>
   `;
   detailsPanelEl.appendChild(gd);
 
-  // Wire events
+  // Helper: apply a material change to all children in the group
+  function applyToGroupMaterial(mutator) {
+    for (const cid of g.children) {
+      const prim = primitives.find((p) => p.id === cid);
+      if (!prim) continue;
+      if (!prim.material) prim.material = {};
+      mutator(prim.material);
+      updatePrimitiveMaterial(prim.id);
+    }
+    saveTagsForWorld();
+  }
+
+  // Wire group events
   gd.querySelector("#group-name-input").addEventListener("change", (e) => {
     g.name = e.target.value.trim() || g.name;
     saveTagsForWorld();
@@ -6466,6 +6431,78 @@ function updateGroupDetailsPanel() {
   });
   gd.querySelector("#group-dup-btn").addEventListener("click", () => duplicateGroup(g.id));
   gd.querySelector("#group-ungroup-btn").addEventListener("click", () => ungroupGroup(g.id));
+
+  // Wire preset buttons
+  gd.querySelectorAll("button[data-grp-preset]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const preset = PRIMITIVE_MATERIAL_PRESETS[btn.getAttribute("data-grp-preset")];
+      if (!preset) return;
+      applyToGroupMaterial((mat) => {
+        if (preset.softness !== undefined) { mat.softness = preset.softness; mat.roughness = preset.softness; }
+        if (preset.hardness !== undefined) mat.hardness = preset.hardness;
+        if (preset.fluffiness !== undefined) mat.fluffiness = preset.fluffiness;
+        if (preset.metalness !== undefined) mat.metalness = preset.metalness;
+        if (preset.transparency !== undefined) mat.opacity = preset.transparency;
+        if (preset.transmission !== undefined) mat.transmission = preset.transmission;
+        if (preset.clearcoat !== undefined) mat.clearcoat = preset.clearcoat;
+        if (preset.clearcoatRoughness !== undefined) mat.clearcoatRoughness = preset.clearcoatRoughness;
+        if (preset.emissive) mat.emissive = preset.emissive;
+        if (preset.emissiveIntensity !== undefined) mat.emissiveIntensity = preset.emissiveIntensity;
+        if (preset.specularIntensity !== undefined) mat.specularIntensity = preset.specularIntensity;
+        if (preset.envMapIntensity !== undefined) mat.envMapIntensity = preset.envMapIntensity;
+        if (preset.ior !== undefined) mat.ior = preset.ior;
+        if (preset.thickness !== undefined) mat.thickness = preset.thickness;
+      });
+      updateGroupDetailsPanel();
+      setStatus(`Applied "${btn.getAttribute("data-grp-preset")}" to group.`);
+    });
+  });
+
+  // Wire material sliders
+  const sliderBindings = [
+    ["grp-roughness", "grp-roughness-val", (v, m) => { m.softness = v; m.roughness = v; }],
+    ["grp-hardness", "grp-hardness-val", (v, m) => { m.hardness = v; }],
+    ["grp-fluffiness", "grp-fluffiness-val", (v, m) => { m.fluffiness = v; }],
+    ["grp-metalness", "grp-metalness-val", (v, m) => { m.metalness = v; }],
+    ["grp-opacity", "grp-opacity-val", (v, m) => { m.opacity = v; }],
+    ["grp-transmission", "grp-transmission-val", (v, m) => { m.transmission = v; }],
+    ["grp-emissive-intensity", "grp-emissive-intensity-val", (v, m) => { m.emissiveIntensity = v; }],
+  ];
+  for (const [inputId, valId, setter] of sliderBindings) {
+    const input = gd.querySelector(`#${inputId}`);
+    const valEl = gd.querySelector(`#${valId}`);
+    input?.addEventListener("input", () => {
+      const v = parseFloat(input.value);
+      if (valEl) valEl.textContent = v.toFixed(2);
+      applyToGroupMaterial((m) => setter(v, m));
+    });
+  }
+
+  // Wire color pickers
+  gd.querySelector("#grp-color")?.addEventListener("input", (e) => {
+    applyToGroupMaterial((m) => { m.color = e.target.value; });
+  });
+  gd.querySelector("#grp-emissive")?.addEventListener("input", (e) => {
+    applyToGroupMaterial((m) => { m.emissive = e.target.value; });
+  });
+
+  // Wire texture upload
+  gd.querySelector("#grp-texture")?.addEventListener("change", (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      applyToGroupMaterial((m) => { m.textureDataUrl = reader.result; });
+      const label = gd.querySelector("#grp-texture-label");
+      if (label) label.textContent = "Change";
+    };
+    reader.readAsDataURL(file);
+  });
+  gd.querySelector("#grp-texture-clear")?.addEventListener("click", () => {
+    applyToGroupMaterial((m) => { m.textureDataUrl = null; });
+    const label = gd.querySelector("#grp-texture-label");
+    if (label) label.textContent = "Upload";
+  });
 }
 
 function duplicateGroup(groupId) {
@@ -7504,18 +7541,14 @@ function removeAiAgent(agent, reason = "manual") {
   if (!agent) return;
   const removedId = String(agent.id || "");
   try {
-    if (agentTask.active) {
-      const before = aiAgents.length;
-      aiAgents = aiAgents.filter((a) => a !== agent);
-      if (before !== aiAgents.length) {
-        agentUiPush(`${new Date().toLocaleTimeString()}\nAGENT DESPAWN\n${agent.id} (${reason})`);
-      }
-    } else {
-      aiAgents = aiAgents.filter((a) => a !== agent);
-    }
+    aiAgents = aiAgents.filter((a) => a !== agent);
+    agentUiPush(`${new Date().toLocaleTimeString()}\nAGENT DESPAWN\n${agent.id} (${reason})`);
     agent.dispose?.();
   } catch {}
-  if (removedId) agentInspectorStateById.delete(removedId);
+  if (removedId) {
+    _agentTasks.delete(removedId);
+    agentInspectorStateById.delete(removedId);
+  }
   if (removedId) removeAgentBadge(removedId);
   if (agentCameraFollowId === removedId) {
     disableAgentCameraFollow();
@@ -7568,9 +7601,8 @@ function createAiAgent({ ephemeral = false } = {}) {
     senseRadius: 3.0,
     walkSpeed: 2.0,
     vlm: {
-      // Agents start with VLM enabled so they can receive tasks immediately.
+      // Ephemeral workers auto-enable; manually spawned agents start idle.
       enabled: true,
-      // Hold position when idle — prevent random wandering before task assignment.
       holdPositionWhenIdle: true,
       endpoint,
       model,
@@ -7580,9 +7612,7 @@ function createAiAgent({ ephemeral = false } = {}) {
       captureBase64: async (a) => {
         // If a sensor mode is active (RGB-D, LiDAR, Compare), capture the
         // on-screen view which already renders in that mode via renderActiveView.
-        // This sends the agent exactly what's on screen.
         if (simSensorViewMode !== "rgb" || simCompareView) {
-          // Position camera at agent's POV
           const [ax, ay, az] = a.getPosition?.() || [0, 0, 0];
           const yaw = a.group?.rotation?.y ?? 0;
           const pitch = typeof a.pitch === "number" ? a.pitch : 0;
@@ -7594,11 +7624,8 @@ function createAiAgent({ ephemeral = false } = {}) {
           camera.lookAt(ax + Math.sin(yaw) * cp, eyeY + sp, az + Math.cos(yaw) * cp);
           camera.updateProjectionMatrix();
           camera.updateMatrixWorld(true);
-          // Render the active sensor view
           renderActiveView();
-          // Capture the canvas
           const dataUrl = renderer.domElement.toDataURL("image/jpeg", 0.8);
-          // Restore camera
           camera.position.copy(prevPos);
           camera.quaternion.copy(prevQuat);
           camera.updateProjectionMatrix();
@@ -7606,7 +7633,6 @@ function createAiAgent({ ephemeral = false } = {}) {
           const idx = dataUrl.indexOf("base64,");
           return idx !== -1 ? dataUrl.slice(idx + 7) : null;
         }
-        // Default RGB: use the standard agent POV capture
         return captureAgentPovBase64({
           agent: a,
           renderer,
@@ -7631,7 +7657,7 @@ function createAiAgent({ ephemeral = false } = {}) {
       },
       decideEverySteps: VLM_DEFAULTS.decideEverySteps,
       stepMeters: VLM_DEFAULTS.stepMeters,
-      getTask: () => ({ ...agentTask }),
+      getTask: () => ({ ..._getAgentTask(id) }),
       // Editor agents need a broader object window so transform IDs stay visible.
       getNearbyAssets: (a) => getNearbyAssetsForAgent(a, appMode === "edit" ? 12 : 2.5),
       getNearbyPrimitives: (a) => getNearbyPrimitivesForAgent(a, appMode === "edit" ? 12 : 2.5),
@@ -7692,27 +7718,39 @@ function createAiAgent({ ephemeral = false } = {}) {
       },
       onTaskFinished: ({ summary }) => {
         const agent = agentRef;
-        const taskEpoch = Number(agent?._taskStartedAt || agentTask.startedAt || 0);
         const summaryText = String(summary || "").trim();
         agentUiPush(`${new Date().toLocaleTimeString()}\nTASK FINISH${agent ? ` [${agent.id}]` : ""}\n${summaryText}`);
 
-        const shouldDespawnOnFinish =
-          appMode === "edit" &&
+        // End this specific agent's task
+        if (agent) {
+          const task = _agentTasks.get(agent.id);
+          if (task) {
+            task.active = false;
+            task.finishedAt = Date.now();
+            task.finishedReason = "model";
+            task.lastSummary = summaryText;
+          }
+        }
+
+        // Auto-despawn if ephemeral or configured to despawn after task
+        const shouldDespawn =
           agent &&
-          (agent?._ephemeral === true || agent?._autoDespawnAfterTask === true);
-        if (shouldDespawnOnFinish && agent) {
+          (agent._ephemeral === true || agent._autoDespawnAfterTask === true);
+        if (shouldDespawn) {
+          _agentTasks.delete(agent.id);
           removeAiAgent(agent, "task-complete");
         }
 
-        const remainingForTask = aiAgents.some((a) => Number(a?._taskStartedAt || 0) === taskEpoch);
-        if (agentTask.active && (!shouldDespawnOnFinish || !remainingForTask)) {
+        // Check if any agents still have active tasks
+        const anyActive = [..._agentTasks.values()].some((t) => t.active);
+        if (!anyActive) {
           agentTask.active = false;
           agentTask.finishedAt = Date.now();
           agentTask.finishedReason = "model";
           agentTask.lastSummary = summaryText;
-          renderAgentTaskUi();
           disableAgentCameraFollow();
         }
+        renderAgentTaskUi();
       },
       onError: (err) => {
         const id = agentRef?.id || "";
@@ -7729,7 +7767,7 @@ function createAiAgent({ ephemeral = false } = {}) {
   agentRef = agent;
   agent._ephemeral = !!ephemeral;
   // Manually spawned editor agents should clean themselves up after task completion.
-  agent._autoDespawnAfterTask = appMode === "edit" && !ephemeral;
+  agent._autoDespawnAfterTask = true;
   // Only inherit the active task if this agent was spawned as part of a worker pool (ephemeral).
   // Manually spawned agents start idle and wait for their own task assignment.
   agent._taskStartedAt = ephemeral ? Number(agentTask.startedAt || 0) : 0;
@@ -9056,6 +9094,14 @@ assetReceiveShadowEl?.addEventListener("change", () => {
   }
 });
 
+assetSelectedPickableEl?.addEventListener("change", () => {
+  const a = getSelectedAsset();
+  if (!a) return;
+  a.pickable = !!assetSelectedPickableEl.checked;
+  saveTagsForWorld();
+  renderAssetsList();
+});
+
 assetBumpableEl?.addEventListener("change", async () => {
   const a = getSelectedAsset();
   if (!a) return;
@@ -9397,9 +9443,9 @@ canvas?.addEventListener("mousedown", (e) => {
     if (!best || d < best.dist) best = { type: "prim", id: primHit.object.userData.primitiveId, dist: d };
   }
 
-  // --- Lights (proxy icon raycast) ---
+  // --- Lights (proxy icon raycast — only the small bulb proxies, not helpers/lines) ---
   const lightTargets = lightsGroup.children.filter(
-    (c) => c.userData?.isLightProxy || c.userData?.isLightHelper || c.userData?.isEditorLight
+    (c) => c.userData?.isLightProxy
   );
   const lightHits = _assetRaycaster.intersectObjects(lightTargets, true);
   if (lightHits.length > 0) {
@@ -9407,7 +9453,8 @@ canvas?.addEventListener("mousedown", (e) => {
     while (obj && !obj.userData?.editorLightId) obj = obj.parent;
     if (obj?.userData?.editorLightId) {
       const d = lightHits[0].distance;
-      if (!best || d < best.dist) best = { type: "light", id: obj.userData.editorLightId, dist: d };
+      // Only pick a light if it's very close to the click — prefer assets/prims
+      if (d < 8 && (!best || d < best.dist - 0.3)) best = { type: "light", id: obj.userData.editorLightId, dist: d };
     }
   }
 
@@ -11815,17 +11862,6 @@ function tick() {
     avatar.visible = false;
   }
 
-  // Splat update — only when a splat renderer exists and needs updating
-  if (sparkRendererMesh && sparkNeedsUpdate) {
-    try {
-      sparkRendererMesh.update({ scene });
-    } catch (e) {
-      console.warn("SparkRenderer.update failed:", e);
-    } finally {
-      sparkNeedsUpdate = false;
-    }
-  }
-
   // Editor-only UI updates — skip entirely in sim mode for headless performance
   if (appMode === "edit") {
     const now = performance.now();
@@ -12202,29 +12238,165 @@ function openManualStagingEditor() {
 function captureCurrentAssetThumbnailDataUrl() {
   if (!renderer) return "";
   try {
-    renderer.render(scene, camera);
-    return renderer.domElement.toDataURL("image/jpeg", 0.72);
+    // Use an overhead camera that frames the current builder content
+    const bbox = new THREE.Box3();
+    primitivesGroup.traverse((c) => { if (c.isMesh) bbox.expandByObject(c); });
+    assetsGroup.traverse((c) => { if (c.isMesh) bbox.expandByObject(c); });
+
+    if (bbox.isEmpty()) {
+      renderer.render(scene, camera);
+      return renderer.domElement.toDataURL("image/jpeg", 0.72);
+    }
+
+    const center = bbox.getCenter(new THREE.Vector3());
+    const size = bbox.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z, 0.5);
+
+    const thumbCam = new THREE.PerspectiveCamera(45, 1, 0.05, 200);
+    thumbCam.position.set(center.x + maxDim * 0.8, center.y + maxDim * 1.0, center.z + maxDim * 0.8);
+    thumbCam.lookAt(center);
+    thumbCam.updateProjectionMatrix();
+    thumbCam.updateMatrixWorld(true);
+
+    const thumbTarget = new THREE.WebGLRenderTarget(256, 256);
+    renderer.setRenderTarget(thumbTarget);
+    renderer.render(scene, thumbCam);
+    renderer.setRenderTarget(null);
+
+    const pixels = new Uint8Array(256 * 256 * 4);
+    renderer.readRenderTargetPixels(thumbTarget, 0, 0, 256, 256, pixels);
+    thumbTarget.dispose();
+
+    const flipped = new Uint8ClampedArray(256 * 256 * 4);
+    for (let y = 0; y < 256; y++) {
+      const src = (255 - y) * 256 * 4;
+      const dst = y * 256 * 4;
+      flipped.set(pixels.subarray(src, src + 256 * 4), dst);
+    }
+    const cvs = document.createElement("canvas");
+    cvs.width = 256;
+    cvs.height = 256;
+    const ctx = cvs.getContext("2d");
+    ctx.putImageData(new ImageData(flipped, 256, 256), 0, 0);
+    return cvs.toDataURL("image/jpeg", 0.75);
   } catch {
     return "";
   }
 }
 
 function readAssetLibraryRecords() {
+  if (Array.isArray(assetLibraryRuntimeCache)) {
+    return JSON.parse(JSON.stringify(assetLibraryRuntimeCache));
+  }
   try {
     const list = JSON.parse(localStorage.getItem(ASSET_LIBRARY_KEY) || "[]");
-    return Array.isArray(list) ? list : [];
+    const out = Array.isArray(list) ? list : [];
+    assetLibraryRuntimeCache = JSON.parse(JSON.stringify(out));
+    return out;
   } catch {
     return [];
   }
 }
 
+function compactSceneForStorage(scene, textureLimit = 500000) {
+  if (!scene || typeof scene !== "object") return scene;
+  const out = JSON.parse(JSON.stringify(scene));
+  for (const p of out.primitives || []) {
+    const m = p?.material;
+    if (!m) continue;
+    const tex = m.textureDataUrl;
+    if (typeof tex === "string" && tex.length > textureLimit) {
+      m.textureDataUrl = null;
+    }
+  }
+  return out;
+}
+
+function compactAssetLibraryForStorage(list, opts = {}) {
+  const textureLimit = Number.isFinite(opts.textureLimit) ? Number(opts.textureLimit) : 500000;
+  const lib = JSON.parse(JSON.stringify(Array.isArray(list) ? list : []));
+  for (const rec of lib) {
+    if (!rec || typeof rec !== "object") continue;
+    rec.scene = compactSceneForStorage(rec.scene, textureLimit);
+    if (Array.isArray(rec.states)) {
+      for (const st of rec.states) {
+        if (!st || typeof st !== "object") continue;
+        st.scene = compactSceneForStorage(st.scene || st.shapeScene, textureLimit);
+        if (st.shapeScene && !st.scene) st.shapeScene = undefined;
+      }
+    }
+  }
+  return lib;
+}
+
 function writeAssetLibraryRecords(list) {
   const arr = Array.isArray(list) ? list : [];
-  localStorage.setItem(ASSET_LIBRARY_KEY, JSON.stringify(arr));
-  window.dispatchEvent(new CustomEvent("asset-library-updated"));
-  renderBuilderStateEditorPanel();
-  // Persist to disk via server (fire-and-forget)
+  assetLibraryRuntimeCache = JSON.parse(JSON.stringify(arr));
+  const attempts = [
+    arr,
+    compactAssetLibraryForStorage(arr, { textureLimit: 500000 }),
+    compactAssetLibraryForStorage(arr, { textureLimit: 250000 }),
+    compactAssetLibraryForStorage(arr, { textureLimit: 100000 }),
+  ];
+  let savedLocal = false;
+  let usedAttempt = 0;
+  let savedCount = arr.length;
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      localStorage.setItem(ASSET_LIBRARY_KEY, JSON.stringify(attempts[i]));
+      savedLocal = true;
+      usedAttempt = i;
+      savedCount = attempts[i].length;
+      break;
+    } catch (err) {
+      const msg = String(err?.name || err?.message || err);
+      if (!/QuotaExceededError/i.test(msg)) {
+        console.warn("[asset-library] localStorage write failed:", err);
+        break;
+      }
+    }
+  }
+  // Last-resort: trim oldest records (keep thumbnails on retained records).
+  if (!savedLocal) {
+    const sorted = [...arr].sort((a, b) => Number(a?.createdAt || 0) - Number(b?.createdAt || 0));
+    let candidate = compactAssetLibraryForStorage(sorted, { textureLimit: 100000 });
+    while (candidate.length > 1) {
+      candidate.shift();
+      try {
+        localStorage.setItem(ASSET_LIBRARY_KEY, JSON.stringify(candidate));
+        savedLocal = true;
+        usedAttempt = attempts.length;
+        savedCount = candidate.length;
+        break;
+      } catch (err) {
+        const msg = String(err?.name || err?.message || err);
+        if (!/QuotaExceededError/i.test(msg)) {
+          console.warn("[asset-library] localStorage trim write failed:", err);
+          break;
+        }
+      }
+    }
+  }
+  // Persist full-fidelity records to disk via server (fire-and-forget).
   _persistAssetLibraryToDisk(arr);
+  if (!savedLocal) {
+    setStatus("Asset library is too large for browser storage. Saved to disk, but local cache could not update.");
+    // Still notify listeners with full-fidelity records so UI does not regress to placeholders.
+    window.dispatchEvent(new CustomEvent("asset-library-updated", { detail: { assets: assetLibraryRuntimeCache, source: "memory" } }));
+    renderBuilderStateEditorPanel();
+    return false;
+  }
+  if (usedAttempt > 0) {
+    if (savedCount < arr.length) {
+      setStatus(`Asset saved. Browser cache kept ${savedCount}/${arr.length} newest assets; full library saved to disk.`);
+    } else {
+      setStatus("Asset saved. Browser cache was compacted to fit storage limits.");
+    }
+  }
+  // Notify listeners with the full list so UI can prefer in-memory records over compacted cache.
+  window.dispatchEvent(new CustomEvent("asset-library-updated", { detail: { assets: assetLibraryRuntimeCache, source: "storage" } }));
+  renderBuilderStateEditorPanel();
+  return true;
 }
 
 function _persistAssetLibraryToDisk(list) {
@@ -12235,6 +12407,13 @@ function _persistAssetLibraryToDisk(list) {
     body: JSON.stringify({ assets: list }),
   }).catch(() => { /* server might be offline — localStorage still has it */ });
 }
+
+window.addEventListener("asset-library-updated", (ev) => {
+  const assets = ev?.detail?.assets;
+  if (Array.isArray(assets)) {
+    assetLibraryRuntimeCache = JSON.parse(JSON.stringify(assets));
+  }
+});
 
 function showBuilderStateFeedback(msg, isError = false) {
   const el = document.getElementById("builder-state-feedback");
@@ -12249,6 +12428,52 @@ function getBuilderEditingAssetRecord(list = null) {
   return lib.find((x) => x.id === builderEditingAssetId) || null;
 }
 
+function getBestAssetLibraryRecordByName(list, title) {
+  const needle = String(title || "").trim().toLowerCase();
+  if (!needle) return null;
+  const matches = (Array.isArray(list) ? list : []).filter(
+    (x) => String(x?.name || "").trim().toLowerCase() === needle,
+  );
+  if (!matches.length) return null;
+  matches.sort((a, b) => Number(b?.createdAt || 0) - Number(a?.createdAt || 0));
+  return matches[0] || null;
+}
+
+function updateBuilderPrimarySaveButton() {
+  if (!builderPrimarySaveBtn) return;
+  const isVisible = currentWorkspace === "assetBuilder" && !!builderEditingAssetId;
+  builderPrimarySaveBtn.classList.toggle("hidden", !isVisible);
+  builderPrimarySaveBtn.textContent = "Save + Done";
+}
+
+async function finishBuilderEditing(saveBeforeExit = true) {
+  if (saveBeforeExit) {
+    const sid = builderEditingStateId;
+    if (sid) {
+      const snapshot = buildCurrentBuilderSceneSnapshot();
+      if (snapshot?.primitives?.length) {
+        updateBuilderEditingAssetRecord((rec) => {
+          const st = (rec.states || []).find((s) => s.id === sid);
+          if (st) st.scene = snapshot;
+          rec.scene = snapshot;
+          const thumb = captureCurrentAssetThumbnailDataUrl();
+          if (typeof thumb === "string" && thumb.startsWith("data:image/")) {
+            rec.thumbnailDataUrl = thumb;
+          }
+          rebuildActionsFromStateInteractions(rec);
+        });
+      }
+    }
+  }
+  builderEditingAssetId = null;
+  builderEditingStateId = null;
+  builderShowTypeChoice = false;
+  await importLevelFromJSON({ tags: [], primitives: [], lights: [], groups: [] });
+  renderBuilderStateEditorPanel();
+  updateBuilderPrimarySaveButton();
+  setStatus("Done editing. Builder cleared.");
+}
+
 function updateBuilderEditingAssetRecord(mutator) {
   const list = readAssetLibraryRecords();
   const idx = list.findIndex((x) => x.id === builderEditingAssetId);
@@ -12256,12 +12481,12 @@ function updateBuilderEditingAssetRecord(mutator) {
   const rec = list[idx];
   mutator(rec);
   list[idx] = rec;
-  writeAssetLibraryRecords(list);
-  return true;
+  return writeAssetLibraryRecords(list);
 }
 
 function renderBuilderStateEditorPanel() {
   if (!builderStateEditorEl) return;
+  updateBuilderPrimarySaveButton();
   const inBuilder = currentWorkspace === "assetBuilder";
   const rec = getBuilderEditingAssetRecord();
   if (!inBuilder) {
@@ -12332,6 +12557,23 @@ function renderBuilderStateEditorPanel() {
   const esc = (s) => escapeHtml(String(s ?? ""));
   const renderStateOptions = () =>
     states.map((s) => `<option value="${esc(s.id)}"${selectedStateId === s.id ? " selected" : ""}>${esc(s.name || s.id)}</option>`).join("");
+  const renderInteractionTargetOptions = (currentTo) =>
+    states
+      .filter((s) => s.id !== selectedStateId)
+      .map((s) => `<option value="${esc(s.id)}"${currentTo === s.id ? " selected" : ""}>${esc(s.name || s.id)}</option>`)
+      .join("");
+  const selectedInteractions = Array.isArray(selectedState?.interactions) ? selectedState.interactions : [];
+  const interactionRowsHtml = selectedInteractions.length
+    ? selectedInteractions.map((it) => `
+        <div class="builder-interaction-row dt-row" data-interaction-id="${esc(it.id)}" style="margin-bottom:4px;align-items:center;">
+          <input class="dt-input builder-transition-label" type="text" data-field="builder-ilabel" value="${esc(it.label || "toggle")}" placeholder="Action label (e.g. Open left drawer)" />
+          <select class="dt-select builder-transition-target" data-field="builder-ito">
+            ${renderInteractionTargetOptions(it.to)}
+          </select>
+          <button class="tb-btn tb-danger builder-transition-remove" type="button" data-action="builder-remove-interaction" title="Remove this transition">Remove</button>
+        </div>
+      `).join("")
+    : `<div style="font-size:11px;color:var(--text-tertiary);margin-bottom:6px;">No custom transitions yet for this state.</div>`;
   builderStateEditorEl.innerHTML = `
     <details class="dt-section" open>
       <summary class="dt-header">Editing: ${esc(rec.name)}</summary>
@@ -12348,6 +12590,9 @@ function renderBuilderStateEditorPanel() {
           <div class="slider"><span class="slider-label">Friction</span><input id="builder-asset-bump-damping" type="range" min="0.70" max="0.99" step="0.01" value="${Number(rec.bumpDamping ?? 0.9).toFixed(2)}" /><span id="builder-asset-bump-damping-val" class="slider-value">${Number(rec.bumpDamping ?? 0.9).toFixed(2)}</span></div>
         </div>
         <label class="prop-check"><input id="builder-auto-cycle" type="checkbox" ${rec.autoCycle !== false ? "checked" : ""} /><span>Auto-cycle states on interact (E)</span></label>
+        <div style="font-size:11px;color:var(--text-tertiary);margin:-2px 0 6px 22px;">
+          Turn this off to create custom transitions (e.g. closed -> half-open -> open).
+        </div>
         <hr style="border:none;border-top:1px solid var(--border);margin:8px 0;" />
         <div style="font-size:12px;font-weight:600;margin-bottom:4px;">States (${states.length})</div>
         <div class="dt-row" style="margin-bottom:4px;">
@@ -12358,6 +12603,15 @@ function renderBuilderStateEditorPanel() {
         <div class="dt-actions" style="margin-top:2px;margin-bottom:6px;">
           <button id="builder-save-current-state-btn" class="tb-btn" type="button" title="Overwrite this state with current shapes">Update State</button>
           <button id="builder-delete-selected-state-btn" class="tb-btn tb-danger" type="button" ${states.length <= 1 ? "disabled" : ""}>Delete</button>
+        </div>
+        <div style="font-size:12px;font-weight:600;margin-bottom:4px;">Transitions from "${esc(selectedState?.name || "state")}"</div>
+        ${rec.autoCycle !== false
+          ? `<div style="font-size:11px;color:var(--text-tertiary);margin-bottom:6px;">Auto-cycle is on. Any manual transition edit/removal will switch to custom mode.</div>`
+          : ``}
+        ${interactionRowsHtml}
+        <div class="dt-actions" style="margin-top:2px;margin-bottom:6px;">
+          <button id="builder-add-interaction-btn" class="tb-btn" type="button" ${states.length <= 1 ? "disabled" : ""}>+ Add Transition</button>
+          <button id="builder-clear-interactions-btn" class="tb-btn tb-danger" type="button" ${(selectedInteractions.length === 0 || states.length <= 1) ? "disabled" : ""}>Clear All</button>
         </div>
         <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;" />
         <div style="font-size:12px;font-weight:600;margin-bottom:4px;">Add New State</div>
@@ -12551,7 +12805,10 @@ function saveCurrentBuilderSceneAsNewState() {
   rebuildActionsFromStateInteractions(target);
   target.currentStateId = target.currentStateId || states[0]?.id || newStateId;
   target.scene = snapshot;
-  target.thumbnailDataUrl = captureCurrentAssetThumbnailDataUrl();
+  const thumb = captureCurrentAssetThumbnailDataUrl();
+  if (typeof thumb === "string" && thumb.startsWith("data:image/")) {
+    target.thumbnailDataUrl = thumb;
+  }
   writeAssetLibraryRecords(existing);
   builderEditingAssetId = target.id;
   builderEditingStateId = newStateId;
@@ -12584,7 +12841,7 @@ async function editSelectedAssetStatesInBuilder() {
   let rec = null;
   if (a.libraryAssetId) rec = list.find((x) => x.id === a.libraryAssetId) || null;
   if (!rec) {
-    rec = list.find((x) => String(x.name || "").toLowerCase() === String(a.title || "").toLowerCase()) || null;
+    rec = getBestAssetLibraryRecordByName(list, a.title);
   }
   if (!rec) {
     setStatus("This asset is not linked to a library record. Save it to library first.");
@@ -12596,6 +12853,22 @@ async function editSelectedAssetStatesInBuilder() {
 builderStateEditorEl?.addEventListener("input", (e) => {
   if (!builderEditingAssetId) return;
   const t = e.target;
+  const irow = t.closest?.(".builder-interaction-row");
+  if (irow && t.getAttribute?.("data-field") === "builder-ilabel") {
+    const iid = irow.getAttribute("data-interaction-id");
+    if (!iid) return;
+    updateBuilderEditingAssetRecord((rec) => {
+      rec.autoCycle = false;
+      const sid = builderEditingStateId || rec.currentStateId || rec.states?.[0]?.id;
+      const st = (rec.states || []).find((s) => s.id === sid);
+      if (!st) return;
+      st.interactions = Array.isArray(st.interactions) ? st.interactions : [];
+      const it = st.interactions.find((x) => x.id === iid);
+      if (it) it.label = t.value;
+      rebuildActionsFromStateInteractions(rec);
+    });
+    return;
+  }
   if (t.id === "builder-asset-name") {
     updateBuilderEditingAssetRecord((rec) => { rec.name = t.value.trim() || rec.name; });
     return;
@@ -12626,6 +12899,22 @@ builderStateEditorEl?.addEventListener("input", (e) => {
 builderStateEditorEl?.addEventListener("change", async (e) => {
   if (!builderEditingAssetId) return;
   const t = e.target;
+  const irow = t.closest?.(".builder-interaction-row");
+  if (irow && t.getAttribute?.("data-field") === "builder-ito") {
+    const iid = irow.getAttribute("data-interaction-id");
+    if (!iid) return;
+    updateBuilderEditingAssetRecord((rec) => {
+      rec.autoCycle = false;
+      const sid = builderEditingStateId || rec.currentStateId || rec.states?.[0]?.id;
+      const st = (rec.states || []).find((s) => s.id === sid);
+      if (!st) return;
+      st.interactions = Array.isArray(st.interactions) ? st.interactions : [];
+      const it = st.interactions.find((x) => x.id === iid);
+      if (it) it.to = t.value;
+      rebuildActionsFromStateInteractions(rec);
+    });
+    return;
+  }
   if (t.id === "builder-asset-pickable") {
     updateBuilderEditingAssetRecord((rec) => { rec.pickable = !!t.checked; });
     return;
@@ -12635,6 +12924,7 @@ builderStateEditorEl?.addEventListener("change", async (e) => {
       rec.autoCycle = !!t.checked;
       rebuildActionsFromStateInteractions(rec);
     });
+    renderBuilderStateEditorPanel();
     return;
   }
   if (t.id === "builder-asset-bumpable") {
@@ -12666,6 +12956,49 @@ builderStateEditorEl?.addEventListener("change", async (e) => {
 builderStateEditorEl?.addEventListener("click", async (e) => {
   const btn = e.target.closest?.("button");
   if (!btn) return;
+  if (btn.id === "builder-add-interaction-btn") {
+    updateBuilderEditingAssetRecord((rec) => {
+      const sid = builderEditingStateId || rec.currentStateId || rec.states?.[0]?.id;
+      const st = (rec.states || []).find((s) => s.id === sid);
+      if (!st) return;
+      st.interactions = Array.isArray(st.interactions) ? st.interactions : [];
+      const fallbackTo = (rec.states || []).find((s) => s.id !== sid)?.id || sid;
+      const iid = `it-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      st.interactions.push({ id: iid, label: "toggle", to: fallbackTo });
+      // Adding custom transitions implies non-cycling behavior.
+      rec.autoCycle = false;
+      rebuildActionsFromStateInteractions(rec);
+    });
+    renderBuilderStateEditorPanel();
+    return;
+  }
+  if (btn.id === "builder-clear-interactions-btn") {
+    updateBuilderEditingAssetRecord((rec) => {
+      rec.autoCycle = false;
+      const sid = builderEditingStateId || rec.currentStateId || rec.states?.[0]?.id;
+      const st = (rec.states || []).find((s) => s.id === sid);
+      if (!st) return;
+      st.interactions = [];
+      rebuildActionsFromStateInteractions(rec);
+    });
+    renderBuilderStateEditorPanel();
+    return;
+  }
+  if (btn.getAttribute?.("data-action") === "builder-remove-interaction") {
+    const row = btn.closest?.(".builder-interaction-row");
+    const iid = row?.getAttribute?.("data-interaction-id");
+    if (!iid) return;
+    updateBuilderEditingAssetRecord((rec) => {
+      rec.autoCycle = false;
+      const sid = builderEditingStateId || rec.currentStateId || rec.states?.[0]?.id;
+      const st = (rec.states || []).find((s) => s.id === sid);
+      if (!st) return;
+      st.interactions = (st.interactions || []).filter((x) => x.id !== iid);
+      rebuildActionsFromStateInteractions(rec);
+    });
+    renderBuilderStateEditorPanel();
+    return;
+  }
 
   // Phase 1: initial save
   if (btn.id === "builder-save-to-library-btn") {
@@ -12707,7 +13040,12 @@ builderStateEditorEl?.addEventListener("click", async (e) => {
     updateBuilderEditingAssetRecord((rec) => {
       const st = (rec.states || []).find((s) => s.id === sid);
       if (st) st.scene = snapshot;
-      rec.thumbnailDataUrl = captureCurrentAssetThumbnailDataUrl();
+      // Keep top-level scene in sync for compatibility with legacy readers.
+      rec.scene = snapshot;
+      const thumb = captureCurrentAssetThumbnailDataUrl();
+      if (typeof thumb === "string" && thumb.startsWith("data:image/")) {
+        rec.thumbnailDataUrl = thumb;
+      }
       rebuildActionsFromStateInteractions(rec);
     });
     showBuilderStateFeedback("State updated.");
@@ -12730,12 +13068,7 @@ builderStateEditorEl?.addEventListener("click", async (e) => {
     return;
   }
   if (btn.id === "builder-done-editing-btn") {
-    builderEditingAssetId = null;
-    builderEditingStateId = null;
-    builderShowTypeChoice = false;
-    await importLevelFromJSON({ tags: [], primitives: [], lights: [], groups: [] });
-    renderBuilderStateEditorPanel();
-    setStatus("Done editing. Builder cleared.");
+    await finishBuilderEditing(true);
     return;
   }
 });
@@ -12835,7 +13168,25 @@ if (toolbar && !document.getElementById("staging-publish-asset-btn")) {
   toolbar.appendChild(btn);
   toolbar.appendChild(stateBtn);
 }
+if (toolbar && !document.getElementById("builder-primary-save-btn")) {
+  const btn = document.createElement("button");
+  btn.id = "builder-primary-save-btn";
+  btn.type = "button";
+  btn.className = "tb-btn tb-primary hidden";
+  btn.style.marginLeft = "auto";
+  btn.style.fontWeight = "700";
+  btn.style.border = "1px solid rgba(255,255,255,0.35)";
+  btn.style.boxShadow = "0 0 0 2px rgba(59,130,246,0.25)";
+  btn.textContent = "Save + Done";
+  btn.addEventListener("click", async () => {
+    if (!builderEditingAssetId || currentWorkspace !== "assetBuilder") return;
+    await finishBuilderEditing(true);
+  });
+  toolbar.appendChild(btn);
+  builderPrimarySaveBtn = btn;
+}
 updateWorkspaceTabUi();
+updateBuilderPrimarySaveButton();
 if (isStagingEditor) {
   setTimeout(() => { switchWorkspace("assetBuilder"); }, 0);
 }
@@ -12843,6 +13194,7 @@ if (isStagingEditor) {
 vibeCreatorApi = initVibeCreator({
   containerEl: document.getElementById("ai-panel"),
   importLevel: importLevelFromJSON,
+  writeAssetLibrary: writeAssetLibraryRecords,
   getCurrentScene: () => {
     // Return a clean snapshot of the current scene (no runtime objects)
     const cleanPrimitives = primitives.map((p) => {
@@ -12903,6 +13255,6 @@ vibeCreatorApi = initVibeCreator({
   imageEndpoint: (localStorage.getItem("sparkWorldVlmEndpoint") || "/vlm/decision").replace("/vlm/decision", "/vlm/generate-image"),
   // ── Model selection ──────────────────────────────────────────────────────
   // Uncomment ONE of the lines below to switch models:
-  model: "gpt-4.1-2025-04-14",          // OpenAI GPT-4.1
-  // model: "gemini-3-flash-preview",   // Google Gemini 2.5 Flash
+  // model: "gpt-4.1-2025-04-14",          // OpenAI GPT-4.1
+  model: "gemini-3-flash-preview",   // Google Gemini 2.5 Flash
 });

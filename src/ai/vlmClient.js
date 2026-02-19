@@ -1,4 +1,4 @@
-// Browser client: talks to a local proxy server in spark-world/vlm-server (recommended)
+// Browser client: talks to the SimStudio VLM backend server
 // so your OpenAI key never ships to the browser.
 
 export async function requestVlmDecision({ endpoint, model, prompt, imageBase64, context, messages }) {

@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
 /**
- * AiAvatar (spark-world)
+ * AiAvatar (SimStudio)
  * - Vanilla THREE (no React)
  * - Uses Rapier KinematicCharacterController for collision-aware movement
  * - "Awareness" of tagged areas via `getTags()` and a sensing radius
@@ -251,8 +251,6 @@ export class AiAvatar {
     // If VLM mode is enabled, it drives the movement plan.
     if (this.vlm?.enabled) {
       this._vlmUpdate(dt, now, nearby);
-      // Only apply idle gravity when NOT actively executing a movement plan.
-      // During movement, _stepPlan already handles gravity via desired.y = -2.0*dt.
       if (!this._plan) this._applyIdleGravity(dt);
       this._syncVisual();
       this._publishGlobals();
@@ -1075,7 +1073,6 @@ export class AiAvatar {
       const desired = { x: 0, y: -15.0 * dt, z: 0 };
       this.controller.computeColliderMovement(this.collider, desired, this.RAPIER.QueryFilterFlags.EXCLUDE_SENSORS);
       const m = this.controller.computedMovement();
-      // Only apply if grounded or falling — never drift horizontally
       this.body.setNextKinematicTranslation({ x: p.x, y: p.y + m.y, z: p.z });
     } catch {}
   }
@@ -1088,7 +1085,6 @@ export class AiAvatar {
   _loadGLB() {
     if (!this.avatarUrl) return;
     const loader = new GLTFLoader();
-    // Try primary URL first, then fallback URLs, then give up silently
     const urls = Array.isArray(this.avatarUrl) ? this.avatarUrl : [this.avatarUrl];
     const tryLoad = (index) => {
       if (index >= urls.length) {
