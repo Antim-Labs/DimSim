@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Sync engine source files from VLM-agent into DimSim.
-# Run after making changes in VLM-agent that should carry over.
+# Sync engine source files from SimStudio into DimSim.
+# Run after making changes in SimStudio that should carry over.
 #
-# Usage: bash copy-sources.sh [/path/to/VLM-agent]
-# Default: looks for VLM-agent as sibling directory on Desktop.
+# Usage: bash copy-sources.sh [/path/to/SimStudio]
+# Default: looks for SimStudio as sibling directory on Desktop.
 
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
-SRC="${1:-/Users/shreyanskothari/Desktop/VLM-agent}"
+SRC="${1:-/Users/shreyanskothari/Desktop/SimStudio}"
 
 if [ ! -f "$SRC/src/main.js" ]; then
-  echo "ERROR: VLM-agent not found at $SRC"
-  echo "Usage: bash copy-sources.sh /path/to/VLM-agent"
+  echo "ERROR: SimStudio not found at $SRC"
+  echo "Usage: bash copy-sources.sh /path/to/SimStudio"
   exit 1
 fi
 

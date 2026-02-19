@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Standalone 3D simulation runner for VLM-agent scenes",
+  "description": "Standalone 3D simulation runner for SimStudio scenes",
   "scripts": {
     "dev": "vite --force",
     "build": "vite build",

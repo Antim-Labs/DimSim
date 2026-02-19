@@ -4237,9 +4237,12 @@ async function agentInteractAsset({ agent, assetId, actionId }) {
   
   console.log(`[INTERACT] Found target: dist=${target.dist.toFixed(2)}m, isLookedAt=${target.isLookedAt}, currentState=${target.currentState}`);
   
-  if (!target.isLookedAt) {
+  if (!target.isLookedAt && target.dist > 1.2) {
     console.warn(`[INTERACT] FAIL: Asset "${assetId}" not looked at (isLookedAt=false)`);
     return { ok: false, reason: "not-looking" };
+  }
+  if (!target.isLookedAt && target.dist <= 1.2) {
+    console.log(`[INTERACT] Allowing close-range interaction despite look mismatch (dist=${target.dist.toFixed(2)}m).`);
   }
   
   // Check if the actionId exists in the target's available actions
@@ -4286,6 +4289,9 @@ const PLAYER_INTERACT_DISTANCE = 1.5; // Max distance player can interact with a
 const _playerInteractRaycaster = new THREE.Raycaster();
 let _interactionPopup = null;
 let _currentInteractableAsset = null;
+let _crosshairInteractCycleIndex = 0;
+let _crosshairInteractCycleSig = "";
+let _crosshairInteractCandidates = [];
 
 // ============================================================================
 // PICK UP / DROP SYSTEM
@@ -4654,35 +4660,59 @@ function getAssetWorldSphere(obj, outSphere) {
   return false;
 }
 
-function getInteractableAssetAtCrosshair() {
-  if (!camera) return null;
-
-  // Build a ray from crosshair — cheap, no recursive scene traversal
+function getInteractableAssetCandidatesAtCrosshair() {
+  if (!camera) return [];
   camera.getWorldPosition(_hintRayOrigin);
   camera.getWorldDirection(_hintRayDir);
   _hintRay.set(_hintRayOrigin, _hintRayDir);
 
-  // Fast pass: check each asset root's bounding sphere (O(n), no deep traversal)
-  let bestAssetId = null;
-  let bestDist = PLAYER_INTERACT_DISTANCE + 0.5;
-
+  const maxDist = PLAYER_INTERACT_DISTANCE + 0.8;
+  const candidates = [];
   for (const child of assetsGroup.children) {
     const aid = child.name?.startsWith("asset:") ? child.name.slice(6) : null;
     if (!aid) continue;
-    // Use cached bounding sphere (O(1), no vertex traversal)
     if (!getAssetWorldSphere(child, _hintTmpSphere)) continue;
     _hintTmpSphere.radius = Math.max(_hintTmpSphere.radius, 0.3);
+    const centerDist = _hintRayOrigin.distanceTo(_hintTmpSphere.center);
+    if (centerDist > maxDist + _hintTmpSphere.radius) continue;
     const hitPoint = _hintRay.intersectSphere(_hintTmpSphere, _tmpV1);
-    if (hitPoint) {
-      const d = _hintRayOrigin.distanceTo(hitPoint);
-      if (d < bestDist) {
-        bestDist = d;
-        bestAssetId = aid;
-      }
-    }
+    if (!hitPoint) continue;
+    const d = _hintRayOrigin.distanceTo(hitPoint);
+    if (d > maxDist) continue;
+    const toCenter = _tmpV2.copy(_hintTmpSphere.center).sub(_hintRayOrigin).normalize();
+    const aim = Math.max(0, _hintRayDir.dot(toCenter));
+    const score = aim * 4.0 - d * 0.45;
+    candidates.push({ id: aid, dist: d, aim, score });
   }
+  candidates.sort((a, b) => (b.score - a.score) || (a.dist - b.dist));
+  return candidates.slice(0, 6);
+}
 
-  if (!bestAssetId) {
+function cycleInteractableTarget(step = 1) {
+  const candidates = getInteractableAssetCandidatesAtCrosshair();
+  if (!Array.isArray(candidates) || candidates.length <= 1) return false;
+  const sig = candidates.map((c) => c.id).join("|");
+  if (sig !== _crosshairInteractCycleSig) {
+    _crosshairInteractCycleSig = sig;
+    _crosshairInteractCycleIndex = 0;
+  }
+  const len = candidates.length;
+  _crosshairInteractCycleIndex = (_crosshairInteractCycleIndex + step + len) % len;
+  _crosshairInteractCandidates = candidates;
+  return true;
+}
+
+function getInteractableAssetAtCrosshair() {
+  const candidates = getInteractableAssetCandidatesAtCrosshair();
+  const sig = candidates.map((c) => c.id).join("|");
+  if (sig !== _crosshairInteractCycleSig) {
+    _crosshairInteractCycleSig = sig;
+    _crosshairInteractCycleIndex = 0;
+  }
+  _crosshairInteractCandidates = candidates;
+  const primary = candidates[_crosshairInteractCycleIndex] || null;
+
+  if (!primary) {
     // Fallback: pickable grouped shape assets
     _playerInteractRaycaster.setFromCamera({ x: 0, y: 0 }, camera);
     const hits = _playerInteractRaycaster.intersectObjects(primitivesGroup.children, false);
@@ -4700,18 +4730,27 @@ function getInteractableAssetAtCrosshair() {
     return null;
   }
 
-  const asset = assets.find((a) => a.id === bestAssetId);
+  const asset = assets.find((a) => a.id === primary.id);
   if (!asset) return null;
 
   const currentState = asset.currentStateId || asset.currentState || "A";
   const actions = (asset.actions || []).filter((act) => act.from === currentState);
-  const holdStatus = isAssetHeld(bestAssetId);
+  const holdStatus = isAssetHeld(primary.id);
   const canPickUp = asset.pickable && !holdStatus.held && !playerHeldAsset && !playerHeldGroupId;
   const isPortal = asset.isPortal && asset.destinationWorld;
 
   if (actions.length === 0 && !canPickUp && !isPortal) return null;
 
-  return { kind: "asset", asset, actions, dist: bestDist, canPickUp, isPortal };
+  return {
+    kind: "asset",
+    asset,
+    actions,
+    dist: primary.dist,
+    canPickUp,
+    isPortal,
+    candidateIndex: _crosshairInteractCycleIndex,
+    candidateCount: candidates.length,
+  };
 }
 
 /**
@@ -10534,6 +10573,12 @@ window.addEventListener("keydown", (e) => {
     handlePlayerInteraction();
     e.preventDefault();
   }
+  if (e.code === "KeyR" && controls?.isLocked && !isTyping && !isInteractionPopupVisible()) {
+    if (cycleInteractableTarget(1)) {
+      updatePlayerInteractionHint();
+      e.preventDefault();
+    }
+  }
   
   // Escape to close interaction popup
   if (e.code === "Escape" && isInteractionPopupVisible()) {
@@ -11976,7 +12021,10 @@ function updateInteractionHint() {
     
     _crosshairEl?.classList.add("interactable");
     if (_interactionHintEl) {
-      _interactionHintEl.innerHTML = `${escapeHtml(title)} · ${escapeHtml(actionText)}<span class="hint-key">E</span>`;
+      const cycleHint = kind === "asset" && target.candidateCount > 1
+        ? ` · Cycle ${target.candidateIndex + 1}/${target.candidateCount}<span class="hint-key">R</span>`
+        : "";
+      _interactionHintEl.innerHTML = `${escapeHtml(title)} · ${escapeHtml(actionText)}<span class="hint-key">E</span>${cycleHint}`;
       _interactionHintEl.classList.add("visible");
     }
   } else {

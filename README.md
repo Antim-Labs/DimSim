@@ -1,6 +1,6 @@
 # DimSim
 
-Standalone 3D simulation runner for VLM-agent scenes. Load a scene, spawn AI agents, run tasks — with full sensor support (RGB-D, LiDAR).
+Standalone 3D simulation runner for SimStudio scenes. Load a scene, spawn AI agents, run tasks — with full sensor support (RGB-D, LiDAR).
 
 ## Setup
 
@@ -28,8 +28,8 @@ DimSim/
 ├── server.js               ← VLM backend (Express + OpenAI SDK)
 ├── src/
 │   ├── main.js             ← Entry point (imports engine.js)
-│   ├── engine.js           ← Full VLM-agent engine (synced via copy-sources.sh)
-│   ├── style.css           ← Synced from VLM-agent
+│   ├── engine.js           ← Full SimStudio engine (synced via copy-sources.sh)
+│   ├── style.css           ← Synced from SimStudio
 │   ├── AiAvatar.js         ← Agent class (synced)
 │   └── ai/                 ← VLM modules (synced)
 ├── public/
@@ -37,11 +37,11 @@ DimSim/
 │   └── agent-model/        ← Robot GLB models
 ├── vlm-server/
 │   └── asset-library.json  ← Persisted asset library data
-├── copy-sources.sh         ← Sync engine from VLM-agent
+├── copy-sources.sh         ← Sync engine from SimStudio
 └── update-sims.sh          ← Rebuild scene manifest
 ```
 
-## Sync from VLM-agent
+## Sync from SimStudio
 
 ```bash
 npm run sync
