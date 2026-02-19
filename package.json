@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "server": "node server.js",
     "sync": "bash copy-sources.sh",
+    "parity:check": "bash check-parity.sh",
     "update-sims": "bash update-sims.sh"
   },
   "dependencies": {

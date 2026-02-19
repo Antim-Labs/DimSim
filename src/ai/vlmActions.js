@@ -1,6 +1,5 @@
-// Central list of allowed actions the VLM can choose from.
-// Each action executes, then a NEW screenshot is taken for the next decision.
-// This is a snapshot-based system, not a video stream.
+// Sim-only action surface for SimStudio/DimSim parity.
+// Keep this list free of editor/build actions.
 
 export const ACTIONS = [
   // === MOVEMENT ===
@@ -26,12 +25,12 @@ export const ACTIONS = [
   },
   {
     id: "MOVE_UP",
-    description: "Move upward (float up). Useful in editor mode for vertical repositioning.",
+    description: "Move upward (float up) for vertical repositioning in sim.",
     params: { steps: "integer 1-3" },
   },
   {
     id: "MOVE_DOWN",
-    description: "Move downward (float down). Useful in editor mode for vertical repositioning.",
+    description: "Move downward (float down) for vertical repositioning in sim.",
     params: { steps: "integer 1-3" },
   },
 
@@ -67,63 +66,20 @@ export const ACTIONS = [
   // === INTERACTION ===
   {
     id: "INTERACT",
-    description: "Interact with an object. REQUIRES: object in NEARBY OBJECTS list AND distance < 1.5m. Use the EXACT assetId from [id: ...] brackets!",
+    description: "Interact with an object. REQUIRES: object in NEARBY OBJECTS list AND distance < 1.5m AND object should be in your field of vision. Use the EXACT assetId from [id: ...] brackets!",
     params: { assetId: "string (EXACT id from [id: xxx] in NEARBY OBJECTS)", actionLabel: "string (from can: list)" },
   },
 
   // === PICK UP / DROP ===
   {
     id: "PICK_UP",
-    description: "Pick up a pickable object. REQUIRES: object marked [pickable] in NEARBY OBJECTS AND distance < 1.5m AND you're not already holding something.",
+    description: "Pick up a pickable object. REQUIRES: object marked [pickable] in NEARBY OBJECTS AND distance < 1.5m AND you're not already holding something AND object should be in your field of vision.",
     params: { assetId: "string (EXACT id from [id: xxx] in NEARBY OBJECTS)" },
   },
   {
     id: "DROP",
     description: "Drop the object you're currently holding. Places it in front of you.",
     params: {},
-  },
-
-  // === EDITOR ACTIONS (edit mode only) ===
-  {
-    id: "CREATE_PRIMITIVE",
-    description: "Create a new primitive at the crosshair placement ghost. EDIT MODE ONLY.",
-    params: { shape: "string (box|sphere|cylinder|cone|torus|plane)" },
-  },
-  {
-    id: "SPAWN_LIBRARY_ASSET",
-    description: "Spawn an asset from the Asset Library near the crosshair by name match. EDIT MODE ONLY.",
-    params: { assetName: "string (name from ASSET LIBRARY list)" },
-  },
-  {
-    id: "TRANSFORM_OBJECT",
-    description: "Transform an existing object by ID. EDIT MODE ONLY. Works for assets and primitives. Supports absolute or delta transforms.",
-    params: {
-      targetType: "string ('asset' or 'primitive')",
-      targetId: "string (EXACT id from nearby lists)",
-      setPositionX: "number world X absolute, optional",
-      setPositionY: "number world Y absolute, optional",
-      setPositionZ: "number world Z absolute, optional",
-      setRotationYDeg: "number absolute yaw degrees, optional",
-      setScaleX: "number absolute scale X, optional",
-      setScaleY: "number absolute scale Y, optional",
-      setScaleZ: "number absolute scale Z, optional",
-      moveX: "number meters, optional",
-      moveY: "number meters, optional",
-      moveZ: "number meters, optional",
-      rotateYDeg: "number degrees, optional",
-      scaleMul: "number multiplier, optional (e.g. 1.1 or 0.9)",
-      snapToCrosshair: "boolean optional (true = move to crosshair placement)",
-    },
-  },
-  {
-    id: "GENERATE_ASSET",
-    description: "Generate a new reusable asset from text in headless mode, save to library, then place it. EDIT MODE ONLY.",
-    params: {
-      prompt: "string (asset description)",
-      placeNow: "boolean optional (default true)",
-      allowMultiple: "boolean optional (default false; set true only when user explicitly asks for multiples)",
-      count: "number optional (if >1, multiple generation is allowed)",
-    },
   },
 
   // === META ===
@@ -140,8 +96,12 @@ export const ACTIONS = [
 ];
 
 export const DEFAULTS = {
-  model: "gpt-4o",
+  model: "gemini-3.1-pro-preview",
   decideEverySteps: 1,
   stepMeters: 0.4,
   maxToiMeters: 50,
 };
+// model: "gpt-4o",
+// model: "gpt-4.1-2025-04-14",          // OpenAI GPT-4.1
+// model: "gemini-3-flash-preview",      // Google Gemini Flash
+// model: "gemini-robotics-er-1.5-preview",

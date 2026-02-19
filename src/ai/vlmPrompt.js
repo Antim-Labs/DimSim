@@ -37,11 +37,12 @@ EXAMPLE:
 To interact with an object:
 1. It must appear in "NEARBY OBJECTS" list
 2. It must be within 1.5 meters (check the distance in parentheses)
-3. Use INTERACT with:
+3. It must be visible in your Field of Vision.
+4. Use INTERACT with:
    - assetId: the EXACT ID shown in [id: xxx] brackets - copy it exactly!
    - actionLabel: one of the actions from the "can:" list
 
-Example: If you see "• Fridge [id: 73799fa3d397c-19b5c3d31fb] (0.8m) - Closed → can: Open"
+Example: If you see "Fridge [id: 73799fa3d397c-19b5c3d31fb] (0.8m) - Closed → can: Open"
 Then use: {"action": "INTERACT", "params": {"assetId": "73799fa3d397c-19b5c3d31fb", "actionLabel": "Open"}}
 
 ## Pick Up / Drop Rules
@@ -60,49 +61,10 @@ Example drop: {"action": "DROP", "params": {}}
 - If distance > 1.5m, move closer first
 - If interaction fails, try moving forward 1-2 steps and try again
 
-## Editor Rules
-
-When "EDITOR MODE: ON", you may use editor actions:
-- CREATE_PRIMITIVE to add new geometry at the crosshair placement
-- SPAWN_LIBRARY_ASSET using a name from "ASSET LIBRARY"
-- TRANSFORM_OBJECT to move/rotate/scale assets or primitives by exact ID
-- GENERATE_ASSET to create a new reusable asset from text (headless) and optionally place it
-
-For TRANSFORM_OBJECT:
-- targetType must be exactly "asset" or "primitive"
-- targetId must exactly match an ID shown in nearby lists
-- Prefer absolute transforms for spawned-agent placement first:
-  - setPositionX/Y/Z for exact placement
-  - setRotationYDeg for exact orientation
-  - setScaleX/Y/Z for exact size
-- Use small incremental edits (example: moveX 0.5, rotateYDeg 15, scaleMul 1.1), then re-check screenshot
-- Use snapToCrosshair=true to move the object directly to the current placement ghost
-
-For GENERATE_ASSET:
-- Default behavior is ONE generated item per prompt.
-- Generate multiple copies ONLY if the user explicitly asked for multiple; then set allowMultiple=true (and optionally count>1).
-- After generating, prioritize TRANSFORM_OBJECT on that asset ID to align placement/orientation/scale with scene context before generating anything else.
-
-When "EDITOR MODE: OFF", do NOT use editor actions.
-
-## Editor Precision Policy (STRICT)
-
-If EDITOR MODE is ON, follow this exact control loop:
-1) **AIM**: first orient the view (TURN/LOOK) toward the build area or target object.
-2) **VERIFY**: confirm from the screenshot that the placement area/object is actually in view.
-3) **APPLY ONE EDIT**: run exactly one editor action.
-4) **RE-CHECK**: wait for next screenshot and evaluate result before next edit.
-
 Hard constraints:
-- Never spam CREATE_PRIMITIVE repeatedly without re-aiming and verifying each step.
-- Prefer TRANSFORM_OBJECT with small deltas over large jumps.
-- For repositioning objects, prefer TRANSFORM_OBJECT with snapToCrosshair=true after aiming.
 - If object IDs are missing/unclear, do NOT guess; reorient until the target appears in nearby lists.
-- Do not ask the user to move you closer. If IDs are missing, navigate yourself (MOVE/TURN/LOOK) until IDs are visible.
-- If placement keeps failing, use TURN/LOOK/MOVE to get a cleaner view instead of random edits.
+- If IDs are missing, navigate yourself (MOVE/TURN/LOOK) until IDs are visible.
 - Do not claim completion unless the final screenshot visibly matches the task intent.
-- For GENERATE_ASSET, use concise prompts ("wooden chair with backrest", "small floor lamp") and avoid huge multi-object requests.
-- Never chain GENERATE_ASSET repeatedly by default. Use a generate -> transform -> verify loop for cohesive scene placement.
 
 ## Output Format
 

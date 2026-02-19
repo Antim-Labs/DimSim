@@ -3,8 +3,10 @@ import "./style.css";
 import * as THREE from "three";
 import { PointerLockControls } from "three/examples/jsm/controls/PointerLockControls.js";
 import { AiAvatar } from "./AiAvatar.js";
-import { ACTIONS as VLM_ACTIONS, DEFAULTS as VLM_DEFAULTS } from "./ai/vlmActions.js";
-import { buildPrompt as buildVlmPrompt } from "./ai/vlmPrompt.js";
+import { ACTIONS as APP_VLM_ACTIONS, DEFAULTS as APP_VLM_DEFAULTS } from "./ai/vlmActions.js";
+import { buildPrompt as buildAppVlmPrompt } from "./ai/vlmPrompt.js";
+import { ACTIONS as SIM_VLM_ACTIONS, DEFAULTS as SIM_VLM_DEFAULTS } from "./ai/sim/vlmActions.js";
+import { buildPrompt as buildSimVlmPrompt } from "./ai/sim/vlmPrompt.js";
 import { requestVlmDecision } from "./ai/vlmClient.js";
 import { captureAgentPovBase64, processPendingCaptures, hasPendingCapture } from "./ai/visionCapture.js";
 import { initVibeCreator } from "./ai/vibeCreator.js";
@@ -12,6 +14,14 @@ import { TransformControls } from "three/examples/jsm/controls/TransformControls
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
+
+const IS_SIM_ONLY_PROFILE = window.__SIM_PROFILE__ === "sim-only";
+const ACTIVE_VLM_ACTIONS = IS_SIM_ONLY_PROFILE ? SIM_VLM_ACTIONS : APP_VLM_ACTIONS;
+const ACTIVE_VLM_DEFAULTS = IS_SIM_ONLY_PROFILE ? SIM_VLM_DEFAULTS : APP_VLM_DEFAULTS;
+const buildActiveVlmPrompt = () =>
+  (IS_SIM_ONLY_PROFILE ? buildSimVlmPrompt : buildAppVlmPrompt)({
+    actions: ACTIVE_VLM_ACTIONS,
+  });
 
 let threeRendererRef = null;
 let threeSceneRef = null;
@@ -63,6 +73,7 @@ const workspaceTabAssetBuilderBtn = document.getElementById("workspace-tab-asset
 const collisionGlbInputEl = document.getElementById("collision-glb-input");
 const worldSelectEl = document.getElementById("world-select");
 const worldLoadBtn = document.getElementById("world-load");
+const editorSimLightPreviewBtn = document.getElementById("editor-sim-light-preview-btn");
 
 // Removed old collision quality/mode elements (simplified UI)
 const tagSelectedEl = document.getElementById("tag-selected");
@@ -346,6 +357,7 @@ let assetBuilderGrid = null;
 let simSensorViewMode = "rgb"; // "rgb" | "rgbd" | "lidar"
 let simCompareView = false; // show RGB + RGB-D + LiDAR side-by-side
 let simPanelCollapsed = false;
+let editorSimLightingPreview = localStorage.getItem("sparkWorldEditorSimPreview") === "1";
 let _placementGhostLastUpdate = 0;
 let rgbdVizMode = "colormap"; // "colormap" | "gray"
 let rgbdAutoRange = true;
@@ -372,6 +384,7 @@ let pendingAssetUpload = null; // { states:[{id,name,glbName,dataBase64,interact
 const assetsGroup = new THREE.Group();
 assetsGroup.name = "assetsGroup";
 let transformControls = null;
+let grid = null;
 const gltfLoader = new GLTFLoader();
 
 // =============================================================================
@@ -2345,7 +2358,7 @@ function applySimSensorViewMode() {
     assetsGroup.visible = true;
     primitivesGroup.visible = true;
     lightsGroup.visible = true;
-    tagsGroup.visible = appMode === "edit";
+    tagsGroup.visible = shouldShowEditorGuides();
     lidarVizGroup.visible = false;
     rgbdPcOverlayGroup.visible = false;
     _rgbdPcGeom.setDrawRange(0, 0);
@@ -2650,6 +2663,42 @@ function setWorldKey(key) {
   loadTagsForWorld();
 }
 
+function shouldShowEditorGuides() {
+  return appMode === "edit" && !editorSimLightingPreview;
+}
+
+function updateEditorSimLightPreviewUi() {
+  if (!editorSimLightPreviewBtn) return;
+  editorSimLightPreviewBtn.classList.toggle("active", editorSimLightingPreview);
+  editorSimLightPreviewBtn.classList.toggle("tb-muted", !editorSimLightingPreview);
+  editorSimLightPreviewBtn.textContent = editorSimLightingPreview ? "Editor View" : "Sim View";
+  editorSimLightPreviewBtn.title = editorSimLightingPreview
+    ? "Restore editor helpers and gizmos"
+    : "Hide editor helpers to preview sim lighting";
+}
+
+function applyEditorGuideVisibility() {
+  const showGuides = shouldShowEditorGuides();
+  if (grid) grid.visible = showGuides;
+  if (tagsGroup) tagsGroup.visible = showGuides;
+  if (!showGuides && placementGhostGroup) placementGhostGroup.visible = false;
+  if (transformControls) {
+    if (!showGuides) {
+      transformControls.detach();
+      transformControls.visible = false;
+      transformControls.enabled = false;
+    } else {
+      const hasSelection = !!selectedAssetId || !!selectedPrimitiveId || !!selectedLightId;
+      transformControls.visible = hasSelection;
+      transformControls.enabled = hasSelection;
+    }
+  }
+  for (const ld of editorLights) {
+    if (ld._proxyObj) ld._proxyObj.visible = showGuides;
+    if (ld._helperObj) ld._helperObj.visible = showGuides;
+  }
+}
+
 function setAppMode(mode) {
   const target = mode === "edit" ? "edit" : "sim";
   // Guard: if the target mode's panel doesn't exist in the DOM, stay in current mode.
@@ -2668,24 +2717,8 @@ function setAppMode(mode) {
   applySimPanelCollapsedState();
   renderAgentTaskUi();
 
-  // Asset/primitive/light transform gizmo only in edit mode.
-  if (transformControls) {
-    if (appMode === "edit") {
-      const hasSelection = !!selectedAssetId || !!selectedPrimitiveId || !!selectedLightId;
-      transformControls.visible = hasSelection;
-      transformControls.enabled = hasSelection;
-    } else {
-      transformControls.detach();
-      transformControls.visible = false;
-      transformControls.enabled = false;
-    }
-  }
-
-  // Toggle light proxy + helper visibility (only show in edit mode)
-  for (const ld of editorLights) {
-    if (ld._proxyObj) ld._proxyObj.visible = appMode === "edit";
-    if (ld._helperObj) ld._helperObj.visible = appMode === "edit";
-  }
+  applyEditorGuideVisibility();
+  updateEditorSimLightPreviewUi();
 
   // Close modal on mode switch.
   showModal(false);
@@ -5814,6 +5847,7 @@ const _placementGhostPos = new THREE.Vector3();
 function updatePlacementGhost(nowMs) {
   const shouldShow =
     appMode === "edit" &&
+    !editorSimLightingPreview &&
     !agentCameraFollow &&
     currentWorkspace === "scene" &&
     !!placementGhostGroup;
@@ -6938,7 +6972,7 @@ function instantiateEditorLight(lightData) {
     lightData.rotation = { x: proxy.rotation.x, y: proxy.rotation.y, z: proxy.rotation.z };
   }
 
-  proxy.visible = appMode === "edit"; // only visible in edit mode
+  proxy.visible = shouldShowEditorGuides();
   lightsGroup.add(proxy);
   lightData._proxyObj = proxy;
 
@@ -6950,7 +6984,7 @@ function instantiateEditorLight(lightData) {
     helperLine.name = `lightHelper:${lightData.id}`;
     helperLine.userData.editorLightId = lightData.id;
     helperLine.userData.isLightHelper = true;
-    helperLine.visible = appMode === "edit";
+    helperLine.visible = shouldShowEditorGuides();
     lightsGroup.add(helperLine);
     lightData._helperObj = helperLine;
   } else {
@@ -7624,7 +7658,8 @@ function despawnEphemeralAgents(reason = "task-end") {
 
 function createAiAgent({ ephemeral = false } = {}) {
   const endpoint = localStorage.getItem("sparkWorldVlmEndpoint") || "/vlm/decision";
-  const model = "gpt-5.2-2025-12-11";
+  const model = ACTIVE_VLM_DEFAULTS.model;
+  const nearbyRange = IS_SIM_ONLY_PROFILE ? 2.5 : appMode === "edit" ? 12 : 2.5;
   const id = `agent-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   let agentRef = null;
   const agent = new AiAvatar({
@@ -7645,8 +7680,8 @@ function createAiAgent({ ephemeral = false } = {}) {
       holdPositionWhenIdle: true,
       endpoint,
       model,
-      actions: VLM_ACTIONS,
-      buildPrompt: () => buildVlmPrompt({ actions: VLM_ACTIONS }),
+      actions: ACTIVE_VLM_ACTIONS,
+      buildPrompt: () => buildActiveVlmPrompt(),
       request: requestVlmDecision,
       captureBase64: async (a) => {
         // If a sensor mode is active (RGB-D, LiDAR, Compare), capture the
@@ -7680,38 +7715,35 @@ function createAiAgent({ ephemeral = false } = {}) {
           width: 960,
           height: 432,
           eyeHeight: PLAYER_EYE_HEIGHT * 0.9,
-          fov: 80,
+          fov: camera.fov,
           near: camera.near,
           far: camera.far,
-          headLamp: { intensity: 1.4, distance: 26, decay: 1.5, offset: { x: 0, y: 1.0, z: 0.6 } },
-          preRender: () => {
-            const prevGrid = grid?.visible;
-            if (grid) grid.visible = false;
-            return () => {
-              if (grid) grid.visible = prevGrid;
-            };
-          },
+          headLamp: null,
           jpegQuality: 0.8,
         });
       },
-      decideEverySteps: VLM_DEFAULTS.decideEverySteps,
-      stepMeters: VLM_DEFAULTS.stepMeters,
+      decideEverySteps: ACTIVE_VLM_DEFAULTS.decideEverySteps,
+      stepMeters: ACTIVE_VLM_DEFAULTS.stepMeters,
       getTask: () => ({ ..._getAgentTask(id) }),
       // Editor agents need a broader object window so transform IDs stay visible.
-      getNearbyAssets: (a) => getNearbyAssetsForAgent(a, appMode === "edit" ? 12 : 2.5),
-      getNearbyPrimitives: (a) => getNearbyPrimitivesForAgent(a, appMode === "edit" ? 12 : 2.5),
-      getRecentGeneratedAssets: (a) => getAgentRecentGeneratedAssets(a, 8),
-      getAssetLibraryNames: () =>
-        readAssetLibraryRecords()
-          .map((r) => String(r?.name || "").trim())
-          .filter(Boolean)
-          .slice(0, 40),
-      isEditorMode: () => appMode === "edit",
-      createPrimitiveInEditor: ({ agent: a, shape }) => agentCreatePrimitiveInEditor({ shape, agent: a }),
-      spawnLibraryAssetInEditor: ({ agent: a, assetName }) => agentSpawnLibraryAssetInEditor({ assetName, agent: a }),
-      transformObjectInEditor: (params) => agentTransformObjectInEditor(params),
-      generateAssetInEditor: ({ agent: a, prompt, placeNow, allowMultiple, count }) =>
-        agentGenerateAssetInEditor({ agent: a, prompt, placeNow, allowMultiple, count }),
+      getNearbyAssets: (a) => getNearbyAssetsForAgent(a, nearbyRange),
+      getNearbyPrimitives: (a) => getNearbyPrimitivesForAgent(a, nearbyRange),
+      isEditorMode: () => (!IS_SIM_ONLY_PROFILE && appMode === "edit"),
+      ...(!IS_SIM_ONLY_PROFILE
+        ? {
+            getRecentGeneratedAssets: (a) => getAgentRecentGeneratedAssets(a, 8),
+            getAssetLibraryNames: () =>
+              readAssetLibraryRecords()
+                .map((r) => String(r?.name || "").trim())
+                .filter(Boolean)
+                .slice(0, 40),
+            createPrimitiveInEditor: ({ agent: a, shape }) => agentCreatePrimitiveInEditor({ shape, agent: a }),
+            spawnLibraryAssetInEditor: ({ agent: a, assetName }) => agentSpawnLibraryAssetInEditor({ assetName, agent: a }),
+            transformObjectInEditor: (params) => agentTransformObjectInEditor(params),
+            generateAssetInEditor: ({ agent: a, prompt, placeNow, allowMultiple, count }) =>
+              agentGenerateAssetInEditor({ agent: a, prompt, placeNow, allowMultiple, count }),
+          }
+        : {}),
       interactAsset: ({ agent: a, assetId, actionId }) => agentInteractAsset({ agent: a, assetId, actionId }),
       pickUpAsset: ({ agent: a, assetId }) => agentPickUpAsset(a, assetId),
       dropAsset: ({ agent: a }) => agentDropAsset(a),
@@ -8213,6 +8245,7 @@ function setGhostMode(enabled) {
 
 // Tagging UI
 setAppMode(appMode);
+updateEditorSimLightPreviewUi();
 // In sim mode, start with an empty scene so the user loads what they want.
 // In edit mode (or combined index.html), restore the previous session from localStorage.
 if (appMode !== "sim") {
@@ -8231,6 +8264,13 @@ simPanelCollapseBtn?.addEventListener("click", () => {
 simPanelOpenBtn?.addEventListener("click", () => {
   simPanelCollapsed = false;
   applySimPanelCollapsedState();
+});
+editorSimLightPreviewBtn?.addEventListener("click", () => {
+  editorSimLightingPreview = !editorSimLightingPreview;
+  localStorage.setItem("sparkWorldEditorSimPreview", editorSimLightingPreview ? "1" : "0");
+  updateEditorSimLightPreviewUi();
+  applyEditorGuideVisibility();
+  setStatus(editorSimLightingPreview ? "Sim lighting preview ON" : "Sim lighting preview OFF");
 });
 // Left editor panel collapse/expand
 leftPanelCollapseBtn?.addEventListener("click", () => {
@@ -10634,7 +10674,7 @@ window.addEventListener("keyup", (e) => {
 });
 
 // Optional reference ground (helps when no splat is loaded).
-const grid = new THREE.GridHelper(50, 50, 0x233043, 0x121722);
+grid = new THREE.GridHelper(50, 50, 0x233043, 0x121722);
 grid.position.y = 0;
 scene.add(grid);
 
@@ -11909,6 +11949,7 @@ function tick() {
 
   // Editor-only UI updates — skip entirely in sim mode for headless performance
   if (appMode === "edit") {
+    if (editorSimLightingPreview) applyEditorGuideVisibility();
     const now = performance.now();
     if (now - _lastHintUpdate > 150) {
       _lastHintUpdate = now;
