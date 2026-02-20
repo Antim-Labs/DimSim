@@ -13,6 +13,9 @@ const __dirname = dirname(__filename);
 const OPENAI_API_KEY = "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";
 const GEMINI_API_KEY = "AIzaSyDnG_fSjtDFeqlP9t-Jj1_PfMjko5uCuL0";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/";
+const VLM_MIN_INTERVAL_MS = 900;
+const VLM_MAX_RETRIES = 4;
+let _lastVlmAt = 0;
 
 // ── Clients ─────────────────────────────────────────────────────────────────
 function getClient(model) {
@@ -20,6 +23,41 @@ function getClient(model) {
     return new OpenAI({ apiKey: GEMINI_API_KEY, baseURL: GEMINI_BASE_URL });
   }
   return new OpenAI({ apiKey: OPENAI_API_KEY });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function paceVlmRequests() {
+  const now = Date.now();
+  const waitMs = Math.max(0, _lastVlmAt + VLM_MIN_INTERVAL_MS - now);
+  if (waitMs > 0) await sleep(waitMs);
+  _lastVlmAt = Date.now();
+}
+
+async function requestWithRetry(runRequest) {
+  let attempt = 0;
+  let lastErr = null;
+  while (attempt < VLM_MAX_RETRIES) {
+    try {
+      await paceVlmRequests();
+      return await runRequest();
+    } catch (err) {
+      lastErr = err;
+      const status = Number(err?.status || err?.statusCode || 0);
+      const retryAfterHeader =
+        Number(err?.headers?.["retry-after"] || err?.response?.headers?.get?.("retry-after") || 0) || 0;
+      const shouldRetry = status === 429 || status === 503 || status === 504;
+      attempt += 1;
+      if (!shouldRetry || attempt >= VLM_MAX_RETRIES) break;
+      const backoff = Math.min(6000, 600 * 2 ** (attempt - 1));
+      const retryAfterMs = retryAfterHeader > 0 ? retryAfterHeader * 1000 : 0;
+      const jitterMs = Math.floor(Math.random() * 250);
+      await sleep(Math.max(backoff, retryAfterMs) + jitterMs);
+    }
+  }
+  throw lastErr;
 }
 
 // ── Asset library file ──────────────────────────────────────────────────────
@@ -58,12 +96,15 @@ app.post("/vlm/decision", async (req, res) => {
       params.max_completion_tokens = maxTok;
     }
 
-    const response = await client.chat.completions.create(params);
+    const response = await requestWithRetry(() => client.chat.completions.create(params));
     const text = response.choices?.[0]?.message?.content || "";
     res.json({ raw: text });
   } catch (err) {
-    console.error("[/vlm/decision]", err.message);
-    res.status(500).json({ detail: err.message });
+    const status = Number(err?.status || err?.statusCode || 500);
+    const safeStatus = Number.isFinite(status) && status >= 400 && status <= 599 ? status : 500;
+    const msg = err?.message || "VLM request failed";
+    console.error("[/vlm/decision]", safeStatus, msg);
+    res.status(safeStatus).json({ detail: msg });
   }
 });
 

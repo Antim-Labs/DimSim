@@ -8,12 +8,15 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
-    <script type="module" crossorigin src="/assets/index-B6vkjXFr.js"></script>
+    <script type="module" crossorigin src="/assets/index-CLVOcJrs.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-mO0d33F8.css">
   </head>
   <body>
     <!-- Force sim mode before main.js loads -->
-    <script>localStorage.setItem("sparkWorldMode","sim");</script>
+    <script>
+      localStorage.setItem("sparkWorldMode", "sim");
+      window.__SIM_PROFILE__ = "sim-only";
+    </script>
 
     <canvas id="c"></canvas>
     <div id="overlay">
@@ -150,6 +153,7 @@
       <!-- Floating Agent Command Bar (sim mode) -->
       <div id="agent-command-bar" class="agent-cmd-bar sim-only">
         <button id="spawn-ai" class="agent-cmd-spawn" type="button" title="Spawn AI agent (B)">+ Spawn</button>
+        <button id="sim-camera-toggle" class="agent-cmd-btn" type="button" title="Toggle user/agent camera">Camera: Agent</button>
         <div id="agent-task-status" class="agent-cmd-status"></div>
         <input id="agent-task-input" class="agent-cmd-input" type="text" placeholder='e.g. "Find and open the fridge"' />
         <button id="agent-task-start" class="agent-cmd-btn" type="button">Start</button>

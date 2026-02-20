@@ -29,8 +29,8 @@ check_pair() {
   fi
 }
 
-check_pair "$SRC/src/ai/sim/vlmActions.js" "$DIR/src/ai/vlmActions.js" "vlmActions (sim)"
-check_pair "$SRC/src/ai/sim/vlmPrompt.js"  "$DIR/src/ai/vlmPrompt.js"  "vlmPrompt (sim)"
+check_pair "$SRC/src/ai/sim/vlmActions.js" "$DIR/src/ai/sim/vlmActions.js" "vlmActions (sim)"
+check_pair "$SRC/src/ai/sim/vlmPrompt.js"  "$DIR/src/ai/sim/vlmPrompt.js"  "vlmPrompt (sim)"
 check_pair "$SRC/src/ai/vlmClient.js"      "$DIR/src/ai/vlmClient.js"  "vlmClient"
 check_pair "$SRC/src/ai/visionCapture.js"  "$DIR/src/ai/visionCapture.js" "visionCapture"
 

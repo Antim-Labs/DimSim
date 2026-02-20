@@ -3,25 +3,19 @@ import "./style.css";
 import * as THREE from "three";
 import { PointerLockControls } from "three/examples/jsm/controls/PointerLockControls.js";
 import { AiAvatar } from "./AiAvatar.js";
-import { ACTIONS as APP_VLM_ACTIONS, DEFAULTS as APP_VLM_DEFAULTS } from "./ai/vlmActions.js";
-import { buildPrompt as buildAppVlmPrompt } from "./ai/vlmPrompt.js";
 import { ACTIONS as SIM_VLM_ACTIONS, DEFAULTS as SIM_VLM_DEFAULTS } from "./ai/sim/vlmActions.js";
 import { buildPrompt as buildSimVlmPrompt } from "./ai/sim/vlmPrompt.js";
 import { requestVlmDecision } from "./ai/vlmClient.js";
 import { captureAgentPovBase64, processPendingCaptures, hasPendingCapture } from "./ai/visionCapture.js";
-import { initVibeCreator } from "./ai/vibeCreator.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 
-const IS_SIM_ONLY_PROFILE = window.__SIM_PROFILE__ === "sim-only";
-const ACTIVE_VLM_ACTIONS = IS_SIM_ONLY_PROFILE ? SIM_VLM_ACTIONS : APP_VLM_ACTIONS;
-const ACTIVE_VLM_DEFAULTS = IS_SIM_ONLY_PROFILE ? SIM_VLM_DEFAULTS : APP_VLM_DEFAULTS;
-const buildActiveVlmPrompt = () =>
-  (IS_SIM_ONLY_PROFILE ? buildSimVlmPrompt : buildAppVlmPrompt)({
-    actions: ACTIVE_VLM_ACTIONS,
-  });
+const IS_SIM_ONLY_PROFILE = true;
+const ACTIVE_VLM_ACTIONS = SIM_VLM_ACTIONS;
+const ACTIVE_VLM_DEFAULTS = SIM_VLM_DEFAULTS;
+const buildActiveVlmPrompt = () => buildSimVlmPrompt({ actions: ACTIVE_VLM_ACTIONS });
 
 let threeRendererRef = null;
 let threeSceneRef = null;
@@ -324,6 +318,7 @@ const agentTaskStatusEl = document.getElementById("agent-task-status");
 const agentTaskInputEl = document.getElementById("agent-task-input");
 const agentTaskStartBtn = document.getElementById("agent-task-start");
 const agentTaskEndBtn = document.getElementById("agent-task-end");
+const simCameraModeToggleBtn = document.getElementById("sim-camera-toggle");
 const simViewRgbdBtn = document.getElementById("sim-view-rgbd");
 const simViewLidarBtn = document.getElementById("sim-view-lidar");
 const simViewCompareBtn = document.getElementById("sim-view-compare");
@@ -357,6 +352,7 @@ let assetBuilderGrid = null;
 let simSensorViewMode = "rgb"; // "rgb" | "rgbd" | "lidar"
 let simCompareView = false; // show RGB + RGB-D + LiDAR side-by-side
 let simPanelCollapsed = false;
+let simUserCameraMode = localStorage.getItem("sparkWorldSimCameraMode") === "user" ? "user" : "agent";
 let editorSimLightingPreview = localStorage.getItem("sparkWorldEditorSimPreview") === "1";
 let _placementGhostLastUpdate = 0;
 let rgbdVizMode = "colormap"; // "colormap" | "gray"
@@ -3112,7 +3108,19 @@ function renderAgentTaskUi() {
     agentTaskEndBtn.disabled = false;
     if (bar) bar.classList.add("active");
   }
+  updateSimCameraModeToggleUi();
   renderSelectedAgentControls();
+}
+
+function updateSimCameraModeToggleUi() {
+  if (!simCameraModeToggleBtn) return;
+  const isUserCam = simUserCameraMode === "user";
+  simCameraModeToggleBtn.textContent = isUserCam ? "Camera: User" : "Camera: Agent";
+  simCameraModeToggleBtn.classList.toggle("active", isUserCam);
+  simCameraModeToggleBtn.classList.toggle("tb-muted", !isUserCam);
+  simCameraModeToggleBtn.title = isUserCam
+    ? "Keep your user camera while the agent runs"
+    : "Follow the active agent while the task runs";
 }
 
 function enableAgentCameraFollow(agentId = selectedAgentInspectorId) {
@@ -3225,8 +3233,8 @@ async function startAgentTask(instruction, { autoPool = true, targetAgentId = nu
   agentUiPush(`${new Date().toLocaleTimeString()}\nTASK START\n${text}${target ? ` [${target.id}]` : ` [${targets.length} agents]`}`);
   renderAgentTaskUi();
   
-  // Follow agent camera only in simulation mode.
-  if (appMode === "sim") enableAgentCameraFollow();
+  // Follow agent camera only when user selected agent camera mode.
+  if (appMode === "sim" && simUserCameraMode === "agent") enableAgentCameraFollow();
 }
 
 function endAgentTask(reason = "manual", agentId = null) {
@@ -8265,6 +8273,16 @@ simPanelOpenBtn?.addEventListener("click", () => {
   simPanelCollapsed = false;
   applySimPanelCollapsedState();
 });
+simCameraModeToggleBtn?.addEventListener("click", () => {
+  simUserCameraMode = simUserCameraMode === "user" ? "agent" : "user";
+  localStorage.setItem("sparkWorldSimCameraMode", simUserCameraMode);
+  updateSimCameraModeToggleUi();
+  if (simUserCameraMode === "user") {
+    if (agentCameraFollow) disableAgentCameraFollow();
+  } else if (appMode === "sim" && agentTask.active) {
+    enableAgentCameraFollow();
+  }
+});
 editorSimLightPreviewBtn?.addEventListener("click", () => {
   editorSimLightingPreview = !editorSimLightingPreview;
   localStorage.setItem("sparkWorldEditorSimPreview", editorSimLightingPreview ? "1" : "0");
@@ -13280,70 +13298,5 @@ if (isStagingEditor) {
   setTimeout(() => { switchWorkspace("assetBuilder"); }, 0);
 }
 
-vibeCreatorApi = initVibeCreator({
-  containerEl: document.getElementById("ai-panel"),
-  importLevel: importLevelFromJSON,
-  writeAssetLibrary: writeAssetLibraryRecords,
-  getCurrentScene: () => {
-    // Return a clean snapshot of the current scene (no runtime objects)
-    const cleanPrimitives = primitives.map((p) => {
-      const { _colliderHandle, ...rest } = p;
-      return rest;
-    });
-    const cleanLights = editorLights.map((l) => {
-      const { _lightObj, _helperObj, _proxyObj, ...rest } = l;
-      return rest;
-    });
-    return { tags: [...tags], primitives: cleanPrimitives, lights: cleanLights, groups: [...groups] };
-  },
-  captureScreenshot: async () => {
-    // Use a dedicated overhead camera that frames the entire scene,
-    // so screenshots are consistent regardless of where the player is looking.
-    const bbox = new THREE.Box3();
-    // Gather bounds from all primitives and assets
-    primitivesGroup.traverse((c) => { if (c.isMesh) bbox.expandByObject(c); });
-    assetsGroup.traverse((c) => { if (c.isMesh) bbox.expandByObject(c); });
-
-    if (bbox.isEmpty()) {
-      // Fallback: use the player camera if no objects exist yet
-      renderer.render(scene, camera);
-      return renderer.domElement.toDataURL("image/jpeg", 0.7).split(",")[1];
-    }
-
-    const center = bbox.getCenter(new THREE.Vector3());
-    const size = bbox.getSize(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z, 2);
-
-    // Position camera at a 3/4 elevated angle looking at the scene center
-    const overheadCam = new THREE.PerspectiveCamera(50, renderer.domElement.width / renderer.domElement.height, 0.1, 500);
-    overheadCam.position.set(
-      center.x + maxDim * 0.9,
-      center.y + maxDim * 1.1,
-      center.z + maxDim * 0.9,
-    );
-    overheadCam.lookAt(center);
-    overheadCam.updateMatrixWorld(true);
-
-    renderer.render(scene, overheadCam);
-    const dataUrl = renderer.domElement.toDataURL("image/jpeg", 0.7);
-    // Re-render with the player camera so the display isn't disrupted
-    renderer.render(scene, camera);
-    return dataUrl.split(",")[1];
-  },
-  captureAssetThumbnail: async () => captureCurrentAssetThumbnailDataUrl(),
-  setStatus,
-  getPlacementAnchor: getSelectionAnchorForVibe,
-  getPlacementAnchorFromScreen: getPlacementAnchorFromScreenForVibe,
-  focusStagingArea: focusVibeStagingArea,
-  openStagingEditor: openManualStagingEditor,
-  openAssetInBuilder: openLibraryAssetInBuilder,
-  getWorkspaceMode: () => currentWorkspace,
-  switchWorkspaceMode: async (nextWorkspace) => { await switchWorkspace(nextWorkspace); },
-  spawnLibraryAsset: spawnShapeLibraryAsset,
-  endpoint: localStorage.getItem("sparkWorldVlmEndpoint") || "/vlm/decision",
-  imageEndpoint: (localStorage.getItem("sparkWorldVlmEndpoint") || "/vlm/decision").replace("/vlm/decision", "/vlm/generate-image"),
-  // ── Model selection ──────────────────────────────────────────────────────
-  // Uncomment ONE of the lines below to switch models:
-  // model: "gpt-4.1-2025-04-14",          // OpenAI GPT-4.1
-  model: "gemini-3-flash-preview",   // Google Gemini 2.5 Flash
-});
+// DimSim is sim-only; editor asset-creation pipeline is disabled.
+vibeCreatorApi = null;
