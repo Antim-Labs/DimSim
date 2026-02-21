@@ -7,7 +7,7 @@
     "eval": "deno run --allow-all cli.ts eval"
   },
   "imports": {
-    "@dimos/lcm": "./vendor/lcm/mod.ts",
+    "@dimos/lcm": "jsr:@dimos/lcm",
     "@dimos/msgs": "jsr:@dimos/msgs",
     "@std/path": "jsr:@std/path",
     "@std/http": "jsr:@std/http"

@@ -1,13 +1,16 @@
 /**
- * EvalHarness -- Browser-side eval orchestrator for dimos integration.
+ * EvalHarness — Browser-side eval orchestrator.
  *
- * Manages workflow execution lifecycle:
- * 1. Receives commands from the Deno eval runner via DimosBridge (WebSocket text messages)
- * 2. Hot-loads environments by calling importLevelFromJSON (no page reload)
- * 3. Teleports agent to workflow start pose
- * 4. Tracks object state each frame (positions from Rapier physics)
- * 5. Captures eval snapshots for LLM judge
- * 6. Computes rubric scores and sends results back to runner
+ * Receives commands from the Deno eval runner (via WebSocket text messages),
+ * executes eval workflows in the Three.js scene, and returns scored results.
+ *
+ * Workflow lifecycle:
+ *   1. Runner sends startWorkflow → harness teleports agent to start pose
+ *   2. Agent moves (driven by dimos /cmd_vel or manually) during timeout period
+ *   3. Timeout fires → harness captures scene state, scores rubrics
+ *   4. Harness sends workflowComplete with pass/fail and scores back to runner
+ *
+ * Supports multi-page parallel evals via channel-based message routing.
  */
 
 import {
@@ -58,6 +61,7 @@ interface EvalCommand {
   type: string;
   scene?: string;
   workflow?: Workflow;
+  channel?: string;
   [key: string]: any;
 }
 
@@ -67,6 +71,10 @@ export interface EvalHarnessOptions {
   captureRgb: () => Promise<string | null>;
   getSceneState: () => SceneState;
   getAgentPose: () => AgentPose | null;
+  /** Channel ID for multi-page parallel evals. If set, only commands
+   *  with matching `channel` field are processed, and all outgoing
+   *  messages include this channel. */
+  channel?: string;
 }
 
 // Extend Window to include __dimosAgent
@@ -82,6 +90,7 @@ export class EvalHarness {
   captureRgb: () => Promise<string | null>;
   getSceneState: () => SceneState;
   getAgentPose: () => AgentPose | null;
+  channel: string | undefined;
 
   _workflow: Workflow | null;
   _startTime: number;
@@ -91,12 +100,13 @@ export class EvalHarness {
   _timeoutTimer: ReturnType<typeof setTimeout> | null;
   _originalOnMessage: ((event: MessageEvent) => void) | null;
 
-  constructor({ bridge, importLevel, captureRgb, getSceneState, getAgentPose }: EvalHarnessOptions) {
+  constructor({ bridge, importLevel, captureRgb, getSceneState, getAgentPose, channel }: EvalHarnessOptions) {
     this.bridge = bridge;
     this.importLevel = importLevel;
     this.captureRgb = captureRgb;
     this.getSceneState = getSceneState;
     this.getAgentPose = getAgentPose;
+    this.channel = channel;
 
     this._workflow = null;
     this._startTime = 0;
@@ -104,6 +114,8 @@ export class EvalHarness {
     this._trajectory = [];
     this._trackingInterval = null;
     this._timeoutTimer = null;
+
+    if (channel) console.log(`[eval] channel: ${channel}`);
 
     // Listen for commands from the eval runner (Deno side)
     this._originalOnMessage = null;
@@ -134,6 +146,9 @@ export class EvalHarness {
       if (typeof event.data === "string") {
         try {
           const cmd: EvalCommand = JSON.parse(event.data);
+          // Channel filtering: if this harness has a channel, only process
+          // commands addressed to it (or commands with no channel for backwards compat)
+          if (this.channel && cmd.channel && cmd.channel !== this.channel) return;
           this._handleCommand(cmd);
         } catch {
           // Not valid JSON -- ignore
@@ -145,13 +160,19 @@ export class EvalHarness {
     };
   }
 
+  /** Send a JSON command back to the runner, tagged with this page's channel. */
+  _send(cmd: Record<string, any>): void {
+    if (this.channel) cmd.channel = this.channel;
+    this.bridge.sendCommand(cmd);
+  }
+
   async _handleCommand(cmd: EvalCommand): Promise<void> {
-    console.log("[eval] command:", cmd.type, cmd);
+    console.log("[eval] command:", cmd.type);
 
     switch (cmd.type) {
       case "loadEnv":
         await this._loadEnvironment(cmd.scene!);
-        this.bridge.sendCommand({ type: "envReady", scene: cmd.scene });
+        this._send({ type: "envReady", scene: cmd.scene });
         break;
 
       case "startWorkflow":
@@ -163,7 +184,7 @@ export class EvalHarness {
         break;
 
       case "ping":
-        this.bridge.sendCommand({ type: "pong", ts: Date.now() });
+        this._send({ type: "pong", ts: Date.now() });
         break;
 
       default:
@@ -183,7 +204,7 @@ export class EvalHarness {
       console.log(`[eval] environment loaded: ${sceneName}`);
     } catch (err: any) {
       console.error("[eval] loadEnv failed:", err);
-      this.bridge.sendCommand({ type: "envError", error: String(err.message || err) });
+      this._send({ type: "envError", error: String(err.message || err) });
     }
   }
 
@@ -218,7 +239,7 @@ export class EvalHarness {
       this._stopWorkflow("timeout");
     }, timeoutMs);
 
-    this.bridge.sendCommand({ type: "workflowStarted", name: workflow.name });
+    this._send({ type: "workflowStarted", name: workflow.name });
   }
 
   _trackFrame(): void {
@@ -238,11 +259,13 @@ export class EvalHarness {
 
     console.log(`[eval] workflow stopped: ${this._workflow.name} (${reason})`);
 
-    // Capture final snapshot for LLM judge
+    // Capture final snapshot for LLM judge (best-effort, not required for distance scoring)
     let finalSnapshot: string | null = null;
     try {
       finalSnapshot = await this.captureRgb();
-    } catch { /* best effort */ }
+    } catch (e) {
+      console.warn("[eval] snapshot capture failed:", e);
+    }
 
     // Score rubrics
     const sceneState = this.getSceneState();
@@ -288,7 +311,7 @@ export class EvalHarness {
     };
 
     console.log("[eval] result:", result);
-    this.bridge.sendCommand(result);
+    this._send(result);
 
     this._workflow = null;
   }

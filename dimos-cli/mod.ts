@@ -1,3 +1,3 @@
 export { startBridgeServer } from "./bridge/server.ts";
-export { launchHeadless } from "./headless/launcher.ts";
-export { runEvals } from "./eval/runner.ts";
+export { launchHeadless, launchMultiPage } from "./headless/launcher.ts";
+export { runEvals, runEvalsMultiPage, collectWorkflows, toJunitXml } from "./eval/runner.ts";

@@ -3,47 +3,65 @@
 /**
  * DimSim Bridge Server
  *
- * - WebSocket ↔ LCM relay (raw binary passthrough, no parsing overhead)
- * - Static file server for the pre-built DimSim frontend (dist/)
- * - Injects dimosMode=true into served index.html
- * - Relays eval harness JSON commands between Deno runner and browser
+ * Sits between the DimSim browser frontend and the dimos Python agent,
+ * translating between WebSocket (browser) and LCM/UDP (dimos).
+ *
+ * Protocol:
+ *   Binary messages = LCM sensor/command packets (passthrough, no parsing)
+ *     Browser → Bridge → LCM:  /cmd_vel (Twist)
+ *     LCM → Bridge → Browser:  /color_image, /depth_image, /lidar, /odom
+ *
+ *   Text messages = JSON eval commands (broadcast to other clients)
+ *     Runner → Bridge → Browser:  ping, loadEnv, startWorkflow, stopWorkflow
+ *     Browser → Bridge → Runner:  pong, envReady, workflowComplete
+ *
+ * Modes:
+ *   Full bridge  — LCM relay + static files + eval commands
+ *   Eval-only    — Static files + eval commands (no LCM, for headless CI)
  */
 
 import { LCM } from "@dimos/lcm";
-import { decodePacket } from "../vendor/lcm/transport.ts";
-import { geometry_msgs } from "@dimos/msgs";
+import { decodeChannel } from "@dimos/msgs";
 import { serveDir } from "@std/http/file-server";
 
 export interface BridgeServerOptions {
   port: number;
   distDir: string;
   scene?: string;
+  /** Skip LCM — only relay eval commands + serve static files (for headless CI). */
+  evalOnly?: boolean;
 }
 
 export async function startBridgeServer(options: BridgeServerOptions) {
-  const { port, distDir, scene } = options;
+  const { port, distDir, scene, evalOnly = false } = options;
   const clients = new Set<WebSocket>();
 
-  // ── LCM setup ───────────────────────────────────────────────────────────
-  const lcm = new LCM();
-  await lcm.start();
+  let lcm: LCM | null = null;
+  let relayCount = 0;
+  let relayBytes = 0;
 
-  // Log odom for debugging (optional)
-  lcm.subscribe("/odom", geometry_msgs.PoseStamped, (msg: { data: { pose: { position: { x: number; y: number; z: number } } } }) => {
-    const pos = msg.data.pose.position;
-    console.log(`[odom] x=${pos.x.toFixed(2)} y=${pos.y.toFixed(2)} z=${pos.z.toFixed(2)}`);
-  });
+  if (!evalOnly) {
+    lcm = new LCM();
+    await lcm.start();
 
-  // Forward ALL raw LCM packets → browser clients
-  lcm.subscribePacket((packet: Uint8Array) => {
-    for (const client of clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(packet);
+    // Forward raw LCM packets → all browser clients
+    lcm.subscribePacket((packet: Uint8Array) => {
+      for (const client of clients) {
+        if (client.readyState === WebSocket.OPEN) client.send(packet);
       }
-    }
-  });
+    });
+
+    setInterval(() => {
+      if (relayCount > 0) {
+        console.log(`[bridge] ${relayCount} packets (${(relayBytes / 1024).toFixed(0)} KB) in last 10s`);
+        relayCount = 0;
+        relayBytes = 0;
+      }
+    }, 10_000);
+  }
 
   // ── HTTP + WebSocket server ─────────────────────────────────────────────
+
   Deno.serve({ port }, async (req: Request) => {
     const url = new URL(req.url);
 
@@ -52,37 +70,33 @@ export async function startBridgeServer(options: BridgeServerOptions) {
       const { socket, response } = Deno.upgradeWebSocket(req);
       socket.binaryType = "arraybuffer";
 
-      socket.onopen = () => {
-        console.log("[bridge] client connected");
-        clients.add(socket);
-      };
+      socket.onopen = () => clients.add(socket);
       socket.onclose = () => clients.delete(socket);
       socket.onerror = () => clients.delete(socket);
 
       socket.onmessage = async (event) => {
         if (event.data instanceof ArrayBuffer) {
-          // Binary = LCM packet → decode and re-publish with fragmentation support
+          // Binary: LCM packet — relay to LCM bus and other WS clients
           const packet = new Uint8Array(event.data);
-          try {
-            const decoded = decodePacket(packet);
-            if (decoded && decoded.type === "small") {
-              // Re-publish through publishRaw which handles fragmentation for large messages
-              await lcm.publishRaw(decoded.channel, decoded.data);
-            } else {
-              // Fragment or unknown — forward as-is
-              await lcm.publishPacket(packet);
+
+          if (lcm) {
+            try {
+              const { channel, payload } = decodeChannel(packet);
+              await lcm.publishRaw(channel, payload);
+              relayCount++;
+              relayBytes += payload.length;
+            } catch (e) {
+              console.warn("[bridge] relay error:", e);
             }
-          } catch (e) {
-            // Silently drop publish errors (e.g., EMSGSIZE for oversized packets)
           }
-          // Relay to other WS clients (so loopback test / other consumers get sensor data)
+
           for (const client of clients) {
             if (client !== socket && client.readyState === WebSocket.OPEN) {
               client.send(packet);
             }
           }
         } else if (typeof event.data === "string") {
-          // Text = eval harness command → broadcast to other clients (eval runner)
+          // Text: JSON eval command — broadcast to other clients
           for (const client of clients) {
             if (client !== socket && client.readyState === WebSocket.OPEN) {
               client.send(event.data);
@@ -94,7 +108,7 @@ export async function startBridgeServer(options: BridgeServerOptions) {
       return response;
     }
 
-    // Serve index.html with dimosMode injection
+    // Serve index.html with dimos mode injection
     if (url.pathname === "/" || url.pathname === "/index.html") {
       try {
         let html = await Deno.readTextFile(`${distDir}/index.html`);
@@ -108,23 +122,20 @@ export async function startBridgeServer(options: BridgeServerOptions) {
       }
     }
 
-    // Serve static files from dist/
+    // Static files from dist/
     return serveDir(req, { fsRoot: distDir, quiet: true });
   });
 
-  console.log(`[dimsim] Bridge server running: http://localhost:${port}`);
-  console.log(`[dimsim] Scene: ${scene || "hotel-lobby"}`);
-  console.log(`[dimsim] Serving dist from: ${distDir}`);
+  console.log(`[bridge] :${port}${evalOnly ? " (eval-only)" : " (LCM bridge)"}`);
 
-  // Run LCM message loop (blocking)
-  await lcm.run();
+  if (lcm) await lcm.run();
 }
 
 // ── Standalone entry point ────────────────────────────────────────────────
+
 if (import.meta.main) {
   const distDir = new URL("../../dist", import.meta.url).pathname;
   const scene = Deno.args.find((_a, i, arr) => arr[i - 1] === "--scene") || "hotel-lobby";
   const port = parseInt(Deno.args.find((_a, i, arr) => arr[i - 1] === "--port") || "8090");
-
   await startBridgeServer({ port, distDir, scene });
 }

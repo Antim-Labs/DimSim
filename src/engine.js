@@ -11968,9 +11968,17 @@ function tick() {
   // Dimos synchronized sensor capture — runs before render so PiP can reuse textures
   if (dimosMode && window.__dimosBridge) {
     const bridge = window.__dimosBridge;
-    if (bridge._connected && bridge._dirty.capture) {
-      bridge._dirty.capture = false;
-      bridge._publishAll();
+    if (bridge._connected) {
+      // Odom: fast (10 Hz) — lightweight, just pose data
+      if (bridge._dirty.odom) {
+        bridge._dirty.odom = false;
+        bridge._publishOdom();
+      }
+      // Sensors: slower (2 Hz) — heavy GPU readback + encoding
+      if (bridge._dirty.sensors) {
+        bridge._dirty.sensors = false;
+        bridge._publishSensors();
+      }
     }
   }
 
@@ -13368,7 +13376,7 @@ if (dimosMode) {
       agent.setPosition(spawnPos.x, spawnPos.y, spawnPos.z);
       // Override the agent's update loop — in dimos mode, movement is driven
       // by /cmd_vel (Twist velocity commands) from the dimos navigation stack.
-      // We integrate velocity each frame to update the kinematic body position.
+      // Uses the character controller for collision-aware movement (no clipping through furniture).
       agent.update = function(dt) {
         const bridge = window.__dimosBridge;
         if (bridge) {
@@ -13381,15 +13389,23 @@ if (dimosMode) {
             const newYaw = yaw + vel.angY * dt;
             this.group.rotation.y = newYaw;
 
-            // Integrate linear velocity in the agent's local frame
-            // Forward (linZ in Three.js) is along the agent's facing direction
+            // Compute desired displacement in world frame
             const cosY = Math.cos(newYaw);
             const sinY = Math.sin(newYaw);
-            const newX = pos.x + (vel.linZ * sinY + vel.linX * cosY) * dt;
-            const newY = pos.y + vel.linY * dt;
-            const newZ = pos.z + (vel.linZ * cosY - vel.linX * sinY) * dt;
+            const desired = {
+              x: (vel.linZ * sinY + vel.linX * cosY) * dt,
+              y: vel.linY * dt - 9.81 * dt * dt * 0.5, // gravity keeps agent grounded
+              z: (vel.linZ * cosY - vel.linX * sinY) * dt,
+            };
 
-            this.body.setNextKinematicTranslation({ x: newX, y: newY, z: newZ });
+            // Use character controller for collision-aware movement
+            if (this.controller && this.collider) {
+              this.controller.computeColliderMovement(this.collider, desired, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS);
+              const m = this.controller.computedMovement();
+              this.body.setNextKinematicTranslation({ x: pos.x + m.x, y: pos.y + m.y, z: pos.z + m.z });
+            } else {
+              this.body.setNextKinematicTranslation({ x: pos.x + desired.x, y: pos.y + desired.y, z: pos.z + desired.z });
+            }
           }
         }
         this._syncVisual();
@@ -13593,10 +13609,10 @@ if (dimosMode) {
         },
       });
 
-      // Hook: after _publishAll, update sidebar panels
-      const origPublishAll = bridge._publishAll.bind(bridge);
-      bridge._publishAll = function() {
-        origPublishAll();
+      // Hook: after _publishSensors, update sidebar panels
+      const origPublishSensors = bridge._publishSensors.bind(bridge);
+      bridge._publishSensors = function() {
+        origPublishSensors();
         _dimosUpdateSidebarPanels(_lastRgbBase64);
       };
 
@@ -13605,10 +13621,12 @@ if (dimosMode) {
       window.__dimosAgent = agent;
 
       // 6. Connect eval harness (hooks bridge text messages for eval commands)
+      const _evalChannel = new URLSearchParams(window.location.search).get("channel") || undefined;
       const { EvalHarness } = await import("./dimos/evalHarness.ts");
       const evalHarness = new EvalHarness({
         bridge,
         importLevel: importLevelFromJSON,
+        channel: _evalChannel,
         captureRgb: () => Promise.resolve(_dimosCaptureRgb()),
         getSceneState: () => ({
           assets: assets.map(a => ({
@@ -13641,6 +13659,230 @@ if (dimosMode) {
       if (!window.__dimosHeadless) {
         const visionDetails = document.getElementById("agent-vision-details");
         if (visionDetails) visionDetails.setAttribute("open", "");
+      }
+
+      // 7. Debug + eval control panel
+      if (!window.__dimosHeadless) {
+        const dbg = document.createElement("div");
+        dbg.id = "dimos-debug";
+        dbg.style.cssText = "position:fixed;bottom:8px;left:8px;z-index:99999;background:rgba(0,0,0,0.88);color:#0f0;font:11px/1.4 monospace;padding:10px 14px;border-radius:8px;max-width:460px;max-height:400px;overflow-y:auto;pointer-events:auto;user-select:text;";
+        document.body.appendChild(dbg);
+
+        const _dbgState = {
+          bridgeConn: false,
+          evalWorkflow: null,
+          evalTimeLeft: 0,
+          evalStatus: "idle",
+          evalResult: null,
+          msgsSent: 0,
+          msgsRecv: 0,
+          lastCmd: "",
+          sensorFps: 0,
+          agentPos: { x: 0, y: 0, z: 0 },
+          _sensorCount: 0,
+          _sensorLastTs: Date.now(),
+          log: [],
+        };
+
+        function _dbgLog(msg) {
+          _dbgState.log.push({ ts: Date.now(), msg });
+          if (_dbgState.log.length > 30) _dbgState.log.shift();
+        }
+
+        // Hook eval harness stop to capture results
+        const _origStop = evalHarness._stopWorkflow.bind(evalHarness);
+        evalHarness._stopWorkflow = async function(reason) {
+          await _origStop(reason);
+          _dbgState.evalStatus = `done (${reason})`;
+        };
+
+        // Hook sendCommand to log and capture results
+        const _origSendCmd = bridge.sendCommand.bind(bridge);
+        bridge.sendCommand = function(cmd) {
+          _dbgState.msgsSent++;
+          _dbgState.lastCmd = `TX: ${cmd.type}`;
+          _dbgLog(`TX ${cmd.type}`);
+          if (cmd.type === "workflowComplete") {
+            _dbgState.evalResult = cmd;
+            const scores = cmd.rubricScores || {};
+            const pass = Object.values(scores).every(s => s.pass !== false);
+            _dbgState.evalStatus = pass ? "PASS" : "FAIL";
+            _dbgLog(`Result: ${pass ? "PASS" : "FAIL"} — ${JSON.stringify(scores)}`);
+          }
+          return _origSendCmd(cmd);
+        };
+
+        // Hook sensor publish for FPS counter
+        const _origPubSensors2 = bridge._publishSensors;
+        bridge._publishSensors = function() {
+          _dbgState._sensorCount++;
+          _origPubSensors2.call(bridge);
+        };
+
+        // Available workflows (loaded from evals/ manifest)
+        let _availableWorkflows = [];
+        async function _loadWorkflows() {
+          try {
+            const resp = await fetch("/sims/manifest.json");
+            if (!resp.ok) return;
+            const manifest = await resp.json();
+            // Also try loading the evals manifest
+          } catch {}
+          // Hardcode known workflows for now (these match evals/ directory)
+          _availableWorkflows = [
+            { name: "reach-vase", env: "hotel-lobby", file: "hotel-lobby/reach-vase.json" },
+          ];
+          // Try to load evals manifest dynamically
+          try {
+            const r = await fetch("/evals/manifest.json");
+            if (r.ok) {
+              const m = await r.json();
+              _availableWorkflows = [];
+              for (const env of m.environments || []) {
+                for (const wf of env.workflows || []) {
+                  _availableWorkflows.push({ name: wf, env: env.name, file: `${env.name}/${wf}.json` });
+                }
+              }
+            }
+          } catch {}
+        }
+        _loadWorkflows();
+
+        // Start eval from browser — no CLI needed
+        async function _startEval(workflowInfo) {
+          if (_dbgState.evalStatus === "running") {
+            _dbgLog("Eval already running!");
+            return;
+          }
+          _dbgState.evalResult = null;
+          _dbgState.evalStatus = "loading";
+          _dbgLog(`Starting eval: ${workflowInfo.name}`);
+
+          try {
+            // Fetch workflow JSON from evals/ directory via bridge server
+            // The bridge serves static files from dist/, but evals/ is outside dist.
+            // So we fetch from a known location or use inline definitions.
+            let workflow;
+            try {
+              const resp = await fetch(`/evals/${workflowInfo.file}`);
+              if (resp.ok) {
+                workflow = await resp.json();
+              }
+            } catch {}
+
+            if (!workflow) {
+              // Fallback: inline workflow definitions
+              const knownWorkflows = {
+                "reach-vase": {
+                  name: "reach-vase",
+                  environment: "hotel-lobby",
+                  task: "Navigate to the large purple vase in the hotel lobby.",
+                  startPose: { x: 0, y: 0.5, z: 3, yaw: 0 },
+                  timeoutSec: 180,
+                  successCriteria: {
+                    objectDistance: { object: "agent", target: "vase", thresholdM: 2.0 }
+                  }
+                },
+              };
+              workflow = knownWorkflows[workflowInfo.name];
+            }
+
+            if (!workflow) {
+              _dbgLog(`ERROR: Could not load workflow ${workflowInfo.name}`);
+              _dbgState.evalStatus = "error";
+              return;
+            }
+
+            _dbgState.evalWorkflow = workflow.name;
+            _dbgState.evalStatus = "running";
+            _dbgState.evalTimeLeft = workflow.timeoutSec || 120;
+
+            // Directly invoke the eval harness (no WebSocket round-trip needed)
+            await evalHarness._startWorkflow(workflow);
+            _dbgLog(`Workflow started: ${workflow.name} (${workflow.timeoutSec}s timeout)`);
+          } catch (err) {
+            _dbgLog(`ERROR starting eval: ${err.message}`);
+            _dbgState.evalStatus = "error";
+          }
+        }
+
+        function _stopEval() {
+          if (evalHarness._workflow) {
+            evalHarness._stopWorkflow("manual-stop");
+            _dbgLog("Eval stopped manually");
+          }
+        }
+
+        // Expose for console access
+        window.__dimosEval = { start: _startEval, stop: _stopEval, workflows: _availableWorkflows };
+
+        // Update loop
+        setInterval(() => {
+          const now = Date.now();
+          const dt = (now - _dbgState._sensorLastTs) / 1000;
+          if (dt >= 1) {
+            _dbgState.sensorFps = Math.round(_dbgState._sensorCount / dt);
+            _dbgState._sensorCount = 0;
+            _dbgState._sensorLastTs = now;
+          }
+
+          if (_dbgState.evalStatus === "running" && evalHarness._startTime) {
+            const wf = evalHarness._workflow;
+            const elapsed = (now - evalHarness._startTime) / 1000;
+            const timeout = wf?.timeoutSec || 120;
+            _dbgState.evalTimeLeft = Math.max(0, Math.round(timeout - elapsed));
+          }
+
+          const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
+          _dbgState.agentPos = { x: ax.toFixed(2), y: ay.toFixed(2), z: az.toFixed(2) };
+          _dbgState.bridgeConn = bridge.ws?.readyState === WebSocket.OPEN;
+
+          // Eval status line
+          let evalLine;
+          if (_dbgState.evalStatus === "running") {
+            evalLine = `<span style="color:#ff0">EVAL: ${_dbgState.evalWorkflow} [${_dbgState.evalTimeLeft}s]</span>`;
+          } else if (_dbgState.evalStatus === "PASS") {
+            const r = _dbgState.evalResult;
+            const dist = r?.rubricScores?.objectDistance?.distanceM;
+            evalLine = `<span style="color:#0f0;font-weight:bold">PASS</span> ${_dbgState.evalWorkflow}` +
+              (dist !== undefined ? ` <span style="color:#888">(${dist.toFixed(1)}m)</span>` : "");
+          } else if (_dbgState.evalStatus === "FAIL") {
+            const r = _dbgState.evalResult;
+            const dist = r?.rubricScores?.objectDistance?.distanceM;
+            evalLine = `<span style="color:#f55;font-weight:bold">FAIL</span> ${_dbgState.evalWorkflow}` +
+              (dist !== undefined ? ` <span style="color:#888">(${dist.toFixed(1)}m)</span>` : "");
+          } else if (_dbgState.evalStatus === "idle") {
+            evalLine = `<span style="color:#888">EVAL: idle</span>`;
+          } else {
+            evalLine = `<span style="color:#0ff">EVAL: ${_dbgState.evalStatus}</span>`;
+          }
+
+          // Workflow buttons
+          const wfBtns = _availableWorkflows.map((wf, i) =>
+            `<button onclick="window.__dimosEval.start(window.__dimosEval.workflows[${i}])" ` +
+            `style="background:#333;color:#0f0;border:1px solid #0f0;border-radius:3px;padding:2px 8px;cursor:pointer;font:10px monospace;margin:1px;"` +
+            `>${wf.name}</button>`
+          ).join(" ");
+
+          const stopBtn = _dbgState.evalStatus === "running"
+            ? ` <button onclick="window.__dimosEval.stop()" style="background:#333;color:#f55;border:1px solid #f55;border-radius:3px;padding:2px 8px;cursor:pointer;font:10px monospace;margin:1px;">Stop</button>`
+            : "";
+
+          // Log (last 8 entries)
+          const logHtml = _dbgState.log.slice(-8).map(l => {
+            const t = new Date(l.ts).toLocaleTimeString();
+            return `<div style="color:#888;font-size:9px;">[${t}] ${l.msg}</div>`;
+          }).join("");
+
+          dbg.innerHTML = `
+            <div style="color:#fff;font-weight:bold;margin-bottom:4px;">dimos debug</div>
+            <div>Bridge: ${_dbgState.bridgeConn ? '<span style="color:#0f0">connected</span>' : '<span style="color:#f00">disconnected</span>'} | Sensors: ${_dbgState.sensorFps} fps</div>
+            <div>Agent: (${_dbgState.agentPos.x}, ${_dbgState.agentPos.y}, ${_dbgState.agentPos.z})</div>
+            <div style="margin:4px 0;">${evalLine}</div>
+            <div style="margin:4px 0;">Run: ${wfBtns}${stopBtn}</div>
+            <div style="border-top:1px solid #333;margin-top:4px;padding-top:4px;">${logHtml}</div>
+          `;
+        }, 500);
       }
 
       console.log("[dimos] Bridge + eval harness connected. Sensor publishing active.");

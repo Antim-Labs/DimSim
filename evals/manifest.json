@@ -4,7 +4,7 @@
     {
       "name": "hotel-lobby",
       "scene": "hotel-lobby",
-      "workflows": ["greet-guest", "reach-vase"]
+      "workflows": ["greet-guest", "reach-vase", "reach-sofa", "reach-elevator", "reach-column", "reach-piano", "reach-reception"]
     },
     {
       "name": "kitchen",

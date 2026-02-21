@@ -1,10 +1,10 @@
 /**
- * Eval rubric scoring functions.
+ * Eval Rubrics — deterministic and LLM-based scoring for eval workflows.
  *
- * Three rubric types:
- * 1. Object Distance -- metric distance between target object and goal position
- * 2. LLM Judge -- subjective VLM evaluation of agent behavior
- * 3. Physical Ground Truth -- check scene state against expected conditions
+ * Rubric types:
+ *   objectDistance  — Euclidean distance between two scene objects (deterministic)
+ *   groundTruth    — Boolean conditions on scene state (e.g. "spatulaOnCounter")
+ *   llmJudge       — VLM-based subjective scoring (sends screenshot + trajectory)
  */
 
 // -- Types --------------------------------------------------------------------
@@ -285,7 +285,6 @@ function _evaluateCondition(condName: string, sceneState: SceneState): boolean {
     return Math.sqrt(dx * dx + dy * dy + dz * dz) < 1.5;
   }
 
-  // Unknown condition format
-  console.warn(`[rubric] Unknown condition format: ${condName}`);
+  console.error(`[rubric] Unknown condition format: "${condName}". Expected "<object>On<surface>" or "<object>Near<target>".`);
   return false;
 }

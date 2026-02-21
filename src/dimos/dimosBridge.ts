@@ -1,12 +1,17 @@
 /**
- * DimosBridge -- Browser-side WebSocket<->LCM client for dimos integration.
+ * DimosBridge — Browser-side WebSocket client for dimos integration.
  *
- * Subscribes to /odom (PoseStamped) to drive agent position/orientation.
- * Publishes sensor data (RGB Image, Depth Image, LiDAR PointCloud2) as LCM
- * packets encoded with @dimos/msgs and sent over WebSocket to the Deno bridge.
+ * Simulates a robot's sensor/command interface over WebSocket:
+ *   Publishes → /odom, /color_image, /depth_image, /lidar  (sensor data to dimos)
+ *   Subscribes → /cmd_vel                                   (velocity commands from dimos)
+ *
+ * All messages are LCM-encoded binary packets using @dimos/msgs, sent over
+ * WebSocket to the bridge server which relays them to/from dimos via LCM/UDP.
+ *
+ * From dimos's perspective, this looks identical to a real robot.
  */
 
-// @ts-ignore -- CDN import, no local type definitions
+// @ts-ignore — CDN import (runs in browser, no Deno/Node type resolution)
 import {
   encodePacket,
   decodePacket,
@@ -24,13 +29,15 @@ const CH_DEPTH = "/depth_image#sensor_msgs.Image";
 const CH_LIDAR = "/lidar#sensor_msgs.PointCloud2";
 
 // -- Default publish rates (ms) ----------------------------------------------
-// Single unified capture rate for synchronized sensor publishing.
-const DEFAULT_RATES: PublishRates = { capture: 200 }; // 5 Hz — all sensors in lockstep
+// Odom needs fast updates (10 Hz) for planner tracking.
+// Sensors (RGB/depth/LiDAR) can be slower to reduce memory pressure.
+const DEFAULT_RATES: PublishRates = { odom: 100, sensors: 500 }; // 10 Hz odom, 2 Hz sensors
 
 // -- Types --------------------------------------------------------------------
 
 export interface PublishRates {
-  capture: number;
+  odom: number;
+  sensors: number;
 }
 
 export interface DepthFrame {
@@ -68,7 +75,8 @@ export interface DimosBridgeOptions {
 }
 
 interface DirtyFlags {
-  capture: boolean;
+  odom: boolean;
+  sensors: boolean;
 }
 
 export class DimosBridge {
@@ -88,7 +96,7 @@ export class DimosBridge {
   _cmdVel: { linX: number; linY: number; linZ: number; angX: number; angY: number; angZ: number } | null;
   _cmdVelStamp: number; // Date.now() when last received — auto-zero after timeout
 
-  // Eval harness hooks -- the eval system can listen to bridge events.
+  // Hooks for eval harness and debug tooling
   _onCmdVel: ((twist: any) => void) | null;
   _onSensorSent: ((type: string, msg: any) => void) | null;
 
@@ -98,10 +106,10 @@ export class DimosBridge {
     this.agent = agent;
     this.sensors = sensorSources;
     this.rates = { ...DEFAULT_RATES, ...rates };
-    this.frameTransform = frameTransform || "identity";
+    this.frameTransform = frameTransform || "ros";
     this.ws = null;
     this._timers = {};
-    this._dirty = { capture: false };
+    this._dirty = { odom: false, sensors: false };
     this._rafId = null;
     this._connected = false;
 
@@ -149,7 +157,6 @@ export class DimosBridge {
     if (channel === CH_CMD_VEL) {
       this._handleCmdVel(data);
     }
-    // Eval harness or other systems can add more channel handlers here.
   }
 
   _handleCmdVel(twist: any): void {
@@ -160,12 +167,12 @@ export class DimosBridge {
     let angX: number, angY: number, angZ: number;
 
     if (this.frameTransform === "ros") {
-      // ROS Twist: linear (x=fwd, y=left, z=up), angular (z=yaw)
-      // Three.js: x=right, y=up, z=fwd
-      linX = -lin.y;   // ROS left -> Three.js -X
-      linY = lin.z;    // ROS up -> Three.js Y
-      linZ = lin.x;    // ROS fwd -> Three.js Z
-      angX = -ang.y;
+      // ROS Z-up → Three.js Y-up: inverse cyclic permutation.
+      // Three_x = ROS_y (left),  Three_y = ROS_z (up),  Three_z = ROS_x (fwd)
+      linX = lin.y;    // ROS left (+Y) -> Three.js +X
+      linY = lin.z;    // ROS up   (+Z) -> Three.js +Y
+      linZ = lin.x;    // ROS fwd  (+X) -> Three.js +Z
+      angX = ang.y;
       angY = ang.z;    // ROS yaw (about Z) -> Three.js yaw (about Y)
       angZ = ang.x;
     } else {
@@ -184,9 +191,10 @@ export class DimosBridge {
     if (this._onCmdVel) this._onCmdVel(twist);
   }
 
-  /** Get current velocity, auto-zeroing after 500ms of no updates (safety stop). */
+  /** Get current velocity, auto-zeroing after timeout of no updates (safety stop).
+   *  1500ms accommodates the dimos pipeline latency (~200-400ms between commands). */
   getCmdVel(): { linX: number; linY: number; linZ: number; angX: number; angY: number; angZ: number } {
-    if (!this._cmdVel || Date.now() - this._cmdVelStamp > 500) {
+    if (!this._cmdVel || Date.now() - this._cmdVelStamp > 1500) {
       return { linX: 0, linY: 0, linZ: 0, angX: 0, angY: 0, angZ: 0 };
     }
     return this._cmdVel;
@@ -195,23 +203,30 @@ export class DimosBridge {
   // -- Outgoing sensor data ---------------------------------------------------
 
   _startPublishing(): void {
-    // Single timer marks all sensors dirty at a unified rate.
-    // The engine's tick() loop checks _dirty.capture and calls _publishAll()
-    // to stay perfectly synchronized with the render loop.
-    this._timers.capture = setInterval(() => { this._dirty.capture = true; }, this.rates.capture);
+    // Separate timers: odom fast (10 Hz), sensors slower (2 Hz) to reduce memory pressure.
+    this._timers.odom = setInterval(() => { this._dirty.odom = true; }, this.rates.odom);
+    this._timers.sensors = setInterval(() => { this._dirty.sensors = true; }, this.rates.sensors);
   }
 
-  /** Capture and publish all sensors + odom with a shared timestamp. */
-  _publishAll(): void {
+  _makeHeader(frameId: string): any {
     const now = Date.now();
-    const header = (frameId: string) => new std_msgs.Header({
+    return new std_msgs.Header({
       stamp: new std_msgs.Time({ sec: Math.floor(now / 1000), nsec: (now % 1000) * 1_000_000 }),
       frame_id: frameId,
     });
-    this._publishOdomSync(header("base_link"));
-    this._publishRgbSync(header("camera_link"));
-    this._publishDepthSync(header("camera_link"));
-    this._publishLidarSync(header("lidar_link"));
+  }
+
+  /** Publish odom only (called at high rate). */
+  _publishOdom(): void {
+    this._publishOdomSync(this._makeHeader("base_link"));
+  }
+
+  /** Capture and publish sensor data (called at lower rate). */
+  _publishSensors(): void {
+    this._publishOdomSync(this._makeHeader("base_link"));
+    this._publishRgbSync(this._makeHeader("camera_link"));
+    this._publishDepthSync(this._makeHeader("camera_link"));
+    this._publishLidarSync(this._makeHeader("lidar_link"));
   }
 
   // -- Odom (agent pose feedback to dimos) ------------------------------------
@@ -221,11 +236,15 @@ export class DimosBridge {
       const pose = this.sensors.getOdomPose();
       if (!pose) return;
 
+      // Three.js is Y-up (X-right, Y-up, Z-forward); dimos expects Z-up
+      // (X-forward, Y-left, Z-up).  The correct mapping is a cyclic
+      // permutation: ROS_x = Three_z, ROS_y = Three_x, ROS_z = Three_y.
+      // Quaternion imaginary components follow the same permutation.
       const odomMsg = new geometry_msgs.PoseStamped({
         header,
         pose: new geometry_msgs.Pose({
-          position: new geometry_msgs.Point({ x: pose.x, y: pose.y, z: pose.z }),
-          orientation: new geometry_msgs.Quaternion({ x: pose.qx, y: pose.qy, z: pose.qz, w: pose.qw }),
+          position: new geometry_msgs.Point({ x: pose.z, y: pose.x, z: pose.y }),
+          orientation: new geometry_msgs.Quaternion({ x: pose.qz, y: pose.qx, z: pose.qy, w: pose.qw }),
         }),
       });
 
@@ -326,11 +345,13 @@ export class DimosBridge {
       const pts = frame.points;         // Float32Array[N*3]
       const intensity = frame.intensity; // Float32Array[N]
 
+      // Three.js Y-up → ROS Z-up: cyclic permutation (x,y,z) → (z,x,y).
+      // ROS_x = Three_z, ROS_y = Three_x, ROS_z = Three_y.
       for (let i = 0; i < numPoints; i++) {
         const off = i * pointStep;
-        view.setFloat32(off, pts[i * 3], true);
-        view.setFloat32(off + 4, pts[i * 3 + 1], true);
-        view.setFloat32(off + 8, pts[i * 3 + 2], true);
+        view.setFloat32(off, pts[i * 3 + 2], true);     // ROS X = Three.js Z (forward)
+        view.setFloat32(off + 4, pts[i * 3], true);     // ROS Y = Three.js X (left)
+        view.setFloat32(off + 8, pts[i * 3 + 1], true); // ROS Z = Three.js Y (up)
         view.setFloat32(off + 12, intensity ? intensity[i] : 1.0, true);
       }
 
@@ -360,10 +381,7 @@ export class DimosBridge {
     }
   }
 
-  // -- Eval harness command channel -------------------------------------------
-  // The bridge also relays JSON commands from the Deno eval runner.
-  // These arrive on the same WebSocket but as text (not binary).
-
+  /** Send a JSON text command (used by eval harness for runner communication). */
   sendCommand(cmd: Record<string, any>): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(JSON.stringify(cmd));

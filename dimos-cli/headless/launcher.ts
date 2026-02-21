@@ -1,15 +1,19 @@
 /**
- * Headless Launcher — Playwright-based headless Chromium for CI/CD.
+ * Headless Launcher — Playwright-based headless Chromium for CI/CD evals.
  *
- * Launches DimSim in a headless browser with WebGL support (SwiftShader
- * for CPU-only environments, real GPU when available).
+ * Rendering modes:
+ *   gpu  — Metal/ANGLE (macOS, fast, max ~3 parallel pages)
+ *   cpu  — SwiftShader (Linux CI, no GPU needed, sequential only on <16 cores)
  */
 
 import { chromium, type Browser, type Page } from "npm:playwright";
 
+export type RenderMode = "gpu" | "cpu";
+
 export interface LaunchOptions {
   url: string;
   timeout?: number;
+  render?: RenderMode;
 }
 
 export interface HeadlessInstance {
@@ -18,51 +22,153 @@ export interface HeadlessInstance {
   close: () => Promise<void>;
 }
 
-export async function launchHeadless(options: LaunchOptions): Promise<HeadlessInstance> {
-  const { url, timeout = 30000 } = options;
+export interface MultiPageInstance {
+  browser: Browser;
+  pages: Page[];
+  channels: string[];
+  close: () => Promise<void>;
+}
 
-  const browser = await chromium.launch({
-    channel: "chrome",  // Use system Chrome (has working WebGL + GPU)
-    headless: false,    // WebGL needs headed mode; use Xvfb on Linux CI for headless
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--enable-webgl",
-      "--enable-webgl2",
-    ],
-  });
+export interface MultiPageOptions {
+  url: string;
+  numPages: number;
+  timeout?: number;
+  render?: RenderMode;
+}
 
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 720 },
-    deviceScaleFactor: 1,
-  });
+// ── Chrome flags per render mode ──────────────────────────────────────────
 
-  const page = await context.newPage();
+const GPU_ARGS = [
+  "--headless=new",
+  "--no-sandbox",
+  "--disable-setuid-sandbox",
+  "--disable-features=SkiaGraphite",
+  "--enable-webgl",
+  "--enable-webgl2",
+  "--ignore-gpu-blocklist",
+  "--enable-gpu",
+  "--use-gl=angle",
+  "--use-angle=metal",
+  "--in-process-gpu",
+  "--disable-gpu-sandbox",
+];
 
-  // Forward browser console to Deno stdout
+const CPU_ARGS = [
+  "--headless=new",
+  "--no-sandbox",
+  "--disable-setuid-sandbox",
+  "--disable-features=SkiaGraphite",
+  "--enable-webgl",
+  "--enable-webgl2",
+  "--use-gl=angle",
+  "--use-angle=swiftshader",
+  "--enable-unsafe-swiftshader",
+  "--disable-gpu",
+];
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+/** Filter noisy browser console output — only forward errors, warnings, and eval/bridge logs. */
+function hookPageConsole(page: Page, tag: string): void {
   page.on("console", (msg) => {
     const type = msg.type();
     const text = msg.text();
-    if (type === "error") console.error(`[browser] ${text}`);
-    else if (type === "warning") console.warn(`[browser] ${text}`);
-    else console.log(`[browser] ${text}`);
+    if (text.includes("Texture marked for update") || text.includes("Failed to load resource") ||
+        text.includes("GPU stall due to ReadPixels") || text.includes("Automatic fallback to software WebGL") ||
+        text.includes("GroupMarkerNotSet")) return;
+    if (type === "error") console.error(`${tag} ${text}`);
+    else if (type === "warning") console.warn(`${tag} ${text}`);
+    else if (text.startsWith("[eval]") || text.startsWith("[DimosBridge]")) {
+      console.log(`${tag} ${text}`);
+    }
+  });
+}
+
+function getViewport(render: RenderMode) {
+  // CPU mode: tiny viewport — SwiftShader renders every pixel on CPU
+  return render === "cpu"
+    ? { width: 320, height: 240 }
+    : { width: 1280, height: 720 };
+}
+
+// ── Single-page launcher ─────────────────────────────────────────────────
+
+export async function launchHeadless(options: LaunchOptions): Promise<HeadlessInstance> {
+  const { url, timeout = 30000, render = "cpu" } = options;
+  const args = render === "gpu" ? GPU_ARGS : CPU_ARGS;
+
+  console.log(`[headless] Launching: render=${render}`);
+
+  const browser = await chromium.launch({
+    headless: false,  // --headless=new passed via args (Playwright's built-in headless uses old mode)
+    args,
   });
 
-  console.log(`[headless] Navigating to ${url}`);
-  await page.goto(url, { waitUntil: "networkidle" });
+  const context = await browser.newContext({ viewport: getViewport(render), deviceScaleFactor: 1 });
+  const page = await context.newPage();
+  hookPageConsole(page, "[browser]");
 
-  // Wait for DimSim engine to be fully initialized
-  console.log("[headless] Waiting for engine init...");
+  await page.goto(url, { waitUntil: "networkidle" });
   await page.waitForFunction(
     () => typeof (window as unknown as Record<string, unknown>).__dimosBridge !== "undefined",
     { timeout },
   );
 
-  console.log("[headless] DimSim engine ready, bridge connected.");
+  console.log("[headless] Engine ready.");
 
   return {
     browser,
     page,
+    close: async () => {
+      await browser.close();
+      console.log("[headless] Browser closed.");
+    },
+  };
+}
+
+// ── Multi-page launcher (single browser, N tabs) ────────────────────────
+
+export async function launchMultiPage(options: MultiPageOptions): Promise<MultiPageInstance> {
+  const { url, numPages, timeout = 30000, render = "cpu" } = options;
+  const args = render === "gpu" ? GPU_ARGS : CPU_ARGS;
+  const viewport = getViewport(render);
+
+  console.log(`[headless] Multi-page: ${numPages} pages, render=${render}`);
+
+  const browser = await chromium.launch({ headless: false, args });
+
+  const pages: Page[] = [];
+  const channels: string[] = [];
+
+  for (let i = 0; i < numPages; i++) {
+    const channel = `page-${i}`;
+    channels.push(channel);
+
+    const context = await browser.newContext({ viewport, deviceScaleFactor: 1 });
+    const page = await context.newPage();
+    hookPageConsole(page, `[page-${i}]`);
+
+    const pageUrl = `${url}?channel=${channel}`;
+    console.log(`[headless] Page ${i}: loading...`);
+    await page.goto(pageUrl, { waitUntil: "networkidle" });
+    await page.waitForFunction(
+      () => typeof (window as unknown as Record<string, unknown>).__dimosBridge !== "undefined",
+      { timeout },
+    );
+    console.log(`[headless] Page ${i}: ready`);
+
+    pages.push(page);
+
+    // Stagger launches to avoid GPU contention during scene load
+    if (i < numPages - 1) await new Promise((r) => setTimeout(r, 2000));
+  }
+
+  console.log(`[headless] All ${numPages} pages ready.`);
+
+  return {
+    browser,
+    pages,
+    channels,
     close: async () => {
       await browser.close();
       console.log("[headless] Browser closed.");

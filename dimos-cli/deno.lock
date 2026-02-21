@@ -1,6 +1,7 @@
 {
   "version": "5",
   "specifiers": {
+    "jsr:@dimos/lcm@*": "0.2.0",
     "jsr:@dimos/msgs@*": "0.1.4",
     "jsr:@std/cli@^1.0.27": "1.0.27",
     "jsr:@std/encoding@^1.0.10": "1.0.10",
@@ -17,6 +18,9 @@
     "npm:playwright@*": "1.58.2"
   },
   "jsr": {
+    "@dimos/lcm@0.2.0": {
+      "integrity": "03399f5e4800f28a0c294981e0210d784232fc65a57707de19052ad805bd5fea"
+    },
     "@dimos/msgs@0.1.4": {
       "integrity": "564bc30b4bc41a562c296c257a15055283ca0cbd66d0627991ede5295832d0c4"
     },
@@ -91,6 +95,7 @@
   },
   "workspace": {
     "dependencies": [
+      "jsr:@dimos/lcm@*",
       "jsr:@dimos/msgs@*",
       "jsr:@std/http@*",
       "jsr:@std/path@*"
