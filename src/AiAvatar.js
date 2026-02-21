@@ -1134,6 +1134,11 @@ export class AiAvatar {
         this.model.position.z -= newCenter.z;
         // Offset down by the body's center height so feet are on the floor
         this.model.position.y = -newMin.y - (this.halfHeight + this.radius);
+        // Keep model forward extent aligned with capsule/cone forward convention.
+        bbox.setFromObject(this.model);
+        const desiredFrontZ = this.radius * 1.1;
+        const frontShift = desiredFrontZ - bbox.max.z;
+        this.model.position.z += frontShift;
         
         // The agent's forward convention is +Z (yaw=0 looks along +Z).
         // This robot model already faces +Z, so no rotation needed.
@@ -1146,20 +1151,7 @@ export class AiAvatar {
           }
         });
 
-        // Shadow proxy: single cheap box that casts shadow for the whole agent
-        const _bb = new THREE.Box3().setFromObject(this.model);
-        const _sz = _bb.getSize(new THREE.Vector3());
-        const _ct = _bb.getCenter(new THREE.Vector3());
-        if (_sz.x > 0.01 && _sz.y > 0.01 && _sz.z > 0.01) {
-          const proxyGeo = new THREE.BoxGeometry(_sz.x, _sz.y, _sz.z);
-          const proxyMat = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: true });
-          const proxy = new THREE.Mesh(proxyGeo, proxyMat);
-          this.model.worldToLocal(_ct);
-          proxy.position.copy(_ct);
-          proxy.castShadow = true;
-          proxy.receiveShadow = false;
-          this.model.add(proxy);
-        }
+        // No shadow proxy box: avoid cube-like shadow blockers around the robot.
 
         this.group.add(this.model);
 

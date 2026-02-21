@@ -11,7 +11,10 @@
   </head>
   <body>
     <!-- Force sim mode before main.js loads -->
-    <script>localStorage.setItem("sparkWorldMode","sim");</script>
+    <script>
+      localStorage.setItem("sparkWorldMode", "sim");
+      window.__SIM_PROFILE__ = "sim-only";
+    </script>
 
     <canvas id="c"></canvas>
     <div id="overlay">
@@ -153,6 +156,7 @@
       <!-- Floating Agent Command Bar (sim mode) -->
       <div id="agent-command-bar" class="agent-cmd-bar sim-only">
         <button id="spawn-ai" class="agent-cmd-spawn" type="button" title="Spawn AI agent (B)">+ Spawn</button>
+        <button id="sim-camera-toggle" class="agent-cmd-btn" type="button" title="Toggle user/agent camera">Camera: Agent</button>
         <div id="agent-task-status" class="agent-cmd-status"></div>
         <input id="agent-task-input" class="agent-cmd-input" type="text" placeholder='e.g. "Find and open the fridge"' />
         <button id="agent-task-start" class="agent-cmd-btn" type="button">Start</button>

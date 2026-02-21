@@ -53,7 +53,7 @@ export function requestAgentCapture({
   fov = 80,           // Wider vertical FOV for more peripheral vision
   near = 0.05,
   far = 2000,
-  headLamp = { intensity: 1.4, distance: 26, decay: 1.5, offset: { x: 0, y: 1.0, z: 0.6 } },
+  headLamp = null,
   preRender = null,
   renderFn = null,    // optional: (renderer, scene, camera) => void — renders active view mode
 }) {
@@ -135,12 +135,7 @@ async function performCaptureWithDelay(captureParams) {
 
   if (!agent || !renderer || !scene || !mainCamera) return null;
 
-  // Get or create lamp for this agent
-  let lamp = _lampByAgent.get(agent);
-  if (!lamp) {
-    lamp = new THREE.PointLight(0xffffff, headLamp.intensity, headLamp.distance, headLamp.decay);
-    _lampByAgent.set(agent, lamp);
-  }
+  let lamp = null;
 
   // Calculate agent's eye position and direction
   const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
@@ -167,17 +162,24 @@ async function performCaptureWithDelay(captureParams) {
     stencilBuffer: false,
   });
 
-  // Set up headlamp
-  const fwdN = forward.clone().normalize();
-  const up = new THREE.Vector3(0, 1, 0);
-  const off = headLamp.offset || { x: 0, y: 1.0, z: 0.6 };
-  const right = new THREE.Vector3().crossVectors(fwdN, up).normalize();
-  const lampPos = new THREE.Vector3(ax, eyeY, az)
-    .addScaledVector(right, off.x)
-    .addScaledVector(up, off.y)
-    .addScaledVector(fwdN, off.z);
-  lamp.position.copy(lampPos);
-  scene.add(lamp);
+  // Optional capture-only fill light. Keep null for strict view parity.
+  if (headLamp && typeof headLamp === "object") {
+    lamp = _lampByAgent.get(agent);
+    if (!lamp) {
+      lamp = new THREE.PointLight(0xffffff, headLamp.intensity, headLamp.distance, headLamp.decay);
+      _lampByAgent.set(agent, lamp);
+    }
+    const fwdN = forward.clone().normalize();
+    const up = new THREE.Vector3(0, 1, 0);
+    const off = headLamp.offset || { x: 0, y: 1.0, z: 0.6 };
+    const right = new THREE.Vector3().crossVectors(fwdN, up).normalize();
+    const lampPos = new THREE.Vector3(ax, eyeY, az)
+      .addScaledVector(right, off.x)
+      .addScaledVector(up, off.y)
+      .addScaledVector(fwdN, off.z);
+    lamp.position.copy(lampPos);
+    scene.add(lamp);
+  }
 
   // Call preRender callback
   let cleanup = null;
@@ -229,8 +231,8 @@ async function performCaptureWithDelay(captureParams) {
   ctx.putImageData(new ImageData(flipped, width, height), 0, 0);
   const dataUrl = cvs.toDataURL("image/jpeg", jpegQuality);
 
-  // Remove lamp
-  scene.remove(lamp);
+  // Remove optional capture lamp
+  if (lamp) scene.remove(lamp);
 
   // Call cleanup
   if (typeof cleanup === "function") {
