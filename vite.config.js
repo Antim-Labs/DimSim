@@ -7,6 +7,9 @@ export default defineConfig({
   assetsInclude: ["**/*.wasm"],
   build: {
     assetsInlineLimit: 0,
+    rollupOptions: {
+      external: [/^https:\/\/esm\.sh\//],
+    },
   },
   server: {
     proxy: {

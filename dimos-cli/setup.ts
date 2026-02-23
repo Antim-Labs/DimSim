@@ -1,0 +1,298 @@
+/**
+ * DimSim Setup — Downloads core assets and scenes from GitHub Releases.
+ *
+ * For private repos, set GITHUB_TOKEN env var for authenticated downloads.
+ * Local data stored at ~/.dimsim/ (override with DIMSIM_HOME env var).
+ *
+ *   ~/.dimsim/
+ *   ├── dist/           (core frontend: index.html, assets/, agent-model/)
+ *   │   └── sims/       (downloaded scene JSON files)
+ *   │       └── apt.json
+ *   └── evals/          (eval workflows)
+ */
+
+const OWNER = "Antim-Labs";
+const REPO = "DimSim";
+const REGISTRY_URL =
+  `https://raw.githubusercontent.com/${OWNER}/${REPO}/main/scenes.json`;
+
+function getGithubToken(): string | undefined {
+  return Deno.env.get("GITHUB_TOKEN") || Deno.env.get("GH_TOKEN");
+}
+
+function authHeaders(): Record<string, string> {
+  const token = getGithubToken();
+  if (!token) return {};
+  return { Authorization: `token ${token}` };
+}
+
+export function getDimsimHome(): string {
+  return (
+    Deno.env.get("DIMSIM_HOME") ||
+    `${Deno.env.get("HOME")}/.dimsim`
+  );
+}
+
+export function getDistDir(): string {
+  return `${getDimsimHome()}/dist`;
+}
+
+// ── Registry ────────────────────────────────────────────────────────────
+
+interface SceneEntry {
+  url: string;
+  description: string;
+  size: number;
+}
+
+interface Registry {
+  version: string;
+  coreUrl: string;
+  scenes: Record<string, SceneEntry>;
+}
+
+async function fetchRegistry(localPath?: string): Promise<Registry> {
+  if (localPath) {
+    return JSON.parse(await Deno.readTextFile(localPath));
+  }
+  const resp = await fetch(REGISTRY_URL, { headers: authHeaders() });
+  if (resp.status === 404 || resp.status === 403) {
+    const token = getGithubToken();
+    if (!token) {
+      throw new Error(
+        `Failed to fetch registry (${resp.status}). ` +
+        `If repo is private, set GITHUB_TOKEN env var.`
+      );
+    }
+    throw new Error(`Failed to fetch registry: ${resp.status} (token may lack repo access)`);
+  }
+  if (!resp.ok) throw new Error(`Failed to fetch registry: ${resp.status}`);
+  return resp.json();
+}
+
+// ── Download with progress ──────────────────────────────────────────────
+
+async function download(url: string, dest: string): Promise<void> {
+  console.log(`  Downloading ${url}`);
+  const headers: Record<string, string> = {
+    ...authHeaders(),
+    Accept: "application/octet-stream",
+  };
+  const resp = await fetch(url, { headers });
+  if (!resp.ok) {
+    if ((resp.status === 404 || resp.status === 403) && !getGithubToken()) {
+      throw new Error(
+        `Download failed (${resp.status}). If repo is private, set GITHUB_TOKEN env var.`
+      );
+    }
+    throw new Error(`Download failed: ${resp.status} ${url}`);
+  }
+
+  const total = parseInt(resp.headers.get("content-length") || "0");
+  const reader = resp.body!.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    if (total > 0) {
+      const pct = ((received / total) * 100).toFixed(0);
+      const mb = (received / 1e6).toFixed(1);
+      Deno.stderr.writeSync(
+        new TextEncoder().encode(`\r  ${mb} MB / ${(total / 1e6).toFixed(1)} MB (${pct}%)`)
+      );
+    }
+  }
+  Deno.stderr.writeSync(new TextEncoder().encode("\n"));
+
+  // Concatenate chunks into a single Uint8Array
+  const totalLength = chunks.reduce((sum, c) => sum + c.length, 0);
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+  await Deno.writeFile(dest, result);
+}
+
+// ── Extract tar.gz ──────────────────────────────────────────────────────
+
+async function extractTarGz(archive: string, destDir: string): Promise<void> {
+  await Deno.mkdir(destDir, { recursive: true });
+  const proc = new Deno.Command("tar", {
+    args: ["-xzf", archive, "-C", destDir],
+    stdout: "inherit",
+    stderr: "inherit",
+  }).spawn();
+  const status = await proc.status;
+  if (!status.success) throw new Error(`tar extract failed (exit ${status.code})`);
+}
+
+/** Extract a single gzipped file (not a tar, just gzip). */
+async function extractGz(archive: string, destFile: string): Promise<void> {
+  const parentDir = destFile.substring(0, destFile.lastIndexOf("/"));
+  await Deno.mkdir(parentDir, { recursive: true });
+  const proc = new Deno.Command("sh", {
+    args: ["-c", `gunzip -c "${archive}" > "${destFile}"`],
+    stdout: "inherit",
+    stderr: "inherit",
+  }).spawn();
+  const status = await proc.status;
+  if (!status.success) throw new Error(`gunzip failed (exit ${status.code})`);
+}
+
+// ── Public API ──────────────────────────────────────────────────────────
+
+export async function setup(localArchive?: string): Promise<void> {
+  const home = getDimsimHome();
+  const distDir = getDistDir();
+
+  console.log(`[dimsim] Setting up in ${home}`);
+  await Deno.mkdir(home, { recursive: true });
+
+  if (localArchive) {
+    console.log(`[dimsim] Extracting core from local archive: ${localArchive}`);
+    await extractTarGz(localArchive, distDir);
+  } else {
+    const registry = await fetchRegistry();
+    const tmpFile = `${home}/core-download.tar.gz`;
+    await download(registry.coreUrl, tmpFile);
+    console.log(`[dimsim] Extracting core assets...`);
+    await extractTarGz(tmpFile, distDir);
+    await Deno.remove(tmpFile);
+  }
+
+  // Ensure sims directory exists
+  await Deno.mkdir(`${distDir}/sims`, { recursive: true });
+
+  // Create empty manifest if none exists
+  const manifestPath = `${distDir}/sims/manifest.json`;
+  try {
+    await Deno.stat(manifestPath);
+  } catch {
+    await Deno.writeTextFile(manifestPath, JSON.stringify([], null, 2));
+  }
+
+  console.log(`[dimsim] Core setup complete.`);
+  console.log(`[dimsim] Install a scene: dimsim scene install apt`);
+}
+
+export async function sceneInstall(
+  name: string,
+  localArchive?: string,
+): Promise<void> {
+  const home = getDimsimHome();
+  const distDir = getDistDir();
+  const simsDir = `${distDir}/sims`;
+  const destFile = `${simsDir}/${name}.json`;
+
+  // Check core is set up
+  try {
+    await Deno.stat(distDir);
+  } catch {
+    console.error(`[dimsim] Core not installed. Run 'dimsim setup' first.`);
+    Deno.exit(1);
+  }
+
+  await Deno.mkdir(simsDir, { recursive: true });
+
+  if (localArchive) {
+    console.log(`[dimsim] Installing scene '${name}' from local: ${localArchive}`);
+    if (localArchive.endsWith(".json")) {
+      await Deno.copyFile(localArchive, destFile);
+    } else {
+      await extractGz(localArchive, destFile);
+    }
+  } else {
+    const registry = await fetchRegistry();
+    const entry = registry.scenes[name];
+    if (!entry) {
+      console.error(`[dimsim] Scene '${name}' not found. Available:`);
+      for (const [k, v] of Object.entries(registry.scenes)) {
+        console.error(`  ${k} — ${v.description}`);
+      }
+      Deno.exit(1);
+    }
+    const tmpFile = `${home}/${name}-download.gz`;
+    console.log(`[dimsim] Downloading scene '${name}' (${(entry.size / 1e6).toFixed(1)} MB)...`);
+    await download(entry.url, tmpFile);
+    console.log(`[dimsim] Extracting...`);
+    await extractGz(tmpFile, destFile);
+    await Deno.remove(tmpFile);
+  }
+
+  // Update local manifest
+  const manifestPath = `${simsDir}/manifest.json`;
+  let manifest: string[] = [];
+  try {
+    manifest = JSON.parse(await Deno.readTextFile(manifestPath));
+  } catch { /* empty */ }
+  if (!manifest.includes(name)) {
+    manifest.push(name);
+    await Deno.writeTextFile(manifestPath, JSON.stringify(manifest, null, 2));
+  }
+
+  console.log(`[dimsim] Scene '${name}' installed.`);
+}
+
+export async function sceneList(): Promise<void> {
+  const simsDir = `${getDistDir()}/sims`;
+
+  // Local scenes
+  const installed: string[] = [];
+  try {
+    for await (const entry of Deno.readDir(simsDir)) {
+      if (entry.name.endsWith(".json") && entry.name !== "manifest.json") {
+        installed.push(entry.name.replace(".json", ""));
+      }
+    }
+  } catch { /* no sims dir */ }
+
+  // Remote scenes
+  let registry: Registry | null = null;
+  try {
+    registry = await fetchRegistry();
+  } catch {
+    console.log("[dimsim] Could not fetch remote registry.");
+  }
+
+  console.log("\nInstalled scenes:");
+  if (installed.length === 0) {
+    console.log("  (none)");
+  } else {
+    for (const s of installed) console.log(`  * ${s}`);
+  }
+
+  if (registry) {
+    console.log("\nAvailable scenes:");
+    for (const [name, entry] of Object.entries(registry.scenes)) {
+      const status = installed.includes(name) ? " (installed)" : "";
+      console.log(`  ${name} — ${entry.description} (${(entry.size / 1e6).toFixed(1)} MB)${status}`);
+    }
+  }
+  console.log();
+}
+
+export async function sceneRemove(name: string): Promise<void> {
+  const simsDir = `${getDistDir()}/sims`;
+  const scenePath = `${simsDir}/${name}.json`;
+  try {
+    await Deno.remove(scenePath);
+    console.log(`[dimsim] Scene '${name}' removed.`);
+  } catch {
+    console.error(`[dimsim] Scene '${name}' not found locally.`);
+    Deno.exit(1);
+  }
+
+  // Update manifest
+  const manifestPath = `${simsDir}/manifest.json`;
+  try {
+    const manifest: string[] = JSON.parse(await Deno.readTextFile(manifestPath));
+    const filtered = manifest.filter((s) => s !== name);
+    await Deno.writeTextFile(manifestPath, JSON.stringify(filtered, null, 2));
+  } catch { /* ok */ }
+}

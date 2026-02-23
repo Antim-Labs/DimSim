@@ -1,0 +1,11 @@
+{
+  "version": "0.1.0",
+  "coreUrl": "https://github.com/Antim-Labs/DimSim/releases/download/v0.1.0/dimsim-core-v0.1.0.tar.gz",
+  "scenes": {
+    "apt": {
+      "url": "https://github.com/Antim-Labs/DimSim/releases/download/v0.1.0/scene-apt-v0.1.0.tar.gz",
+      "description": "Modern apartment interior",
+      "size": 71000000
+    }
+  }
+}

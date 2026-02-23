@@ -102,11 +102,16 @@
             </details>
           </div>
 
-          <!-- Agent debug (collapsed by default) -->
-          <details class="agent-collapse">
+          <!-- Agent sensor views (auto-opened in dimos mode) -->
+          <details class="agent-collapse" id="agent-vision-details">
             <summary>Agent Vision</summary>
             <div class="agent-vision">
+              <div class="agent-sensor-label">RGB</div>
               <img id="agent-shot-img" class="agent-shot-img" alt="Agent POV" />
+              <div class="agent-sensor-label">Depth</div>
+              <canvas id="agent-depth-canvas" class="agent-sensor-canvas"></canvas>
+              <div class="agent-sensor-label">LiDAR</div>
+              <canvas id="agent-lidar-canvas" class="agent-sensor-canvas"></canvas>
             </div>
             <div class="agent-collapse-content">
               <div class="section-label">Last Decision</div>
@@ -160,6 +165,7 @@
 
       <!-- Interaction Hint -->
       <div id="interaction-hint" aria-hidden="true"></div>
+
     </div>
     
     <img src="/logo.svg" alt="" class="watermark-logo" />
