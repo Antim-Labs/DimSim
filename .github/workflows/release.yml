@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      # Build frontend
+      - name: Install npm deps
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      # Package release artifacts
+      - name: Package release
+        run: bash scripts/package-release.sh "${GITHUB_REF_NAME#v}"
+
+      # Create GitHub Release with tarballs
+      - name: Create GitHub Release
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dimsim-core-v${GITHUB_REF_NAME#v}.tar.gz" \
+            "scene-apt-v${GITHUB_REF_NAME#v}.tar.gz" \
+            --title "DimSim ${GITHUB_REF_NAME}" \
+            --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Publish CLI to JSR
+      - name: Publish to JSR
+        run: cd dimos-cli && deno publish --allow-dirty

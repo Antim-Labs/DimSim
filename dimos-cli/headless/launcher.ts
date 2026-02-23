@@ -6,7 +6,7 @@
  *   cpu  — SwiftShader (Linux CI, no GPU needed, sequential only on <16 cores)
  */
 
-import { chromium, type Browser, type Page } from "npm:playwright";
+import { chromium, type Browser, type Page } from "playwright";
 
 export type RenderMode = "gpu" | "cpu";
 

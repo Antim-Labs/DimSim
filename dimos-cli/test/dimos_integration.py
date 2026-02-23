@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-DimSim ↔ dimos Integration Test
+DimSim ↔ dimos Integration Test (UDP Multicast)
 
 Validates end-to-end connectivity between DimSim (browser sim) and dimos
-(Python robotics stack) via WebSocket through the bridge server.
+(Python robotics stack) via LCM UDP multicast through the bridge server.
 
 Data flow:
-  Python  ──WebSocket──▶  Bridge Server  ──WebSocket──▶  Browser (DimSim)
-  Python  ◀──WebSocket──  Bridge Server  ◀──WebSocket──  Browser (DimSim)
+  Python  ──UDP multicast──▶  Bridge Server  ──WebSocket──▶  Browser (DimSim)
+  Python  ◀──UDP multicast──  Bridge Server  ◀──WebSocket──  Browser (DimSim)
 
 This script:
-  1. Connects to the bridge WebSocket (same as the browser does)
-  2. Publishes /cmd_vel Twist commands encoded as LCM packets → agent moves in sim
-  3. Subscribes to /odom, /camera/image, /camera/depth, /lidar/points
+  1. Joins the LCM multicast group (239.255.76.67:7667)
+  2. Publishes /cmd_vel Twist commands as LCM packets via UDP multicast → agent moves
+  3. Listens for /odom, /camera/image, /camera/depth, /lidar/points on multicast
   4. Reports what it receives; SUCCESS when all 4 channels are live
 
 Prerequisites:
@@ -23,29 +23,27 @@ Prerequisites:
        /path/to/dimos/.venv/bin/python dimos-cli/test/dimos_integration.py
 
 Options:
-  --ws URL       WebSocket URL (default: ws://localhost:8090)
   --timeout N    Timeout in seconds (default: 30)
   --rate N       cmd_vel publish rate in Hz (default: 10)
 """
 
 import sys
-import json
 import time
 import struct
+import socket
 import threading
 import argparse
-
-import websocket
 
 # dimos message types for encoding cmd_vel
 from dimos.msgs.geometry_msgs import Twist, Vector3
 
-# -- LCM packet codec (matches @dimos/msgs encodePacket / decodePacket) ------
-# Format: [Magic BE u32][Seq BE u32][Channel UTF-8][NULL][Payload]
-# Standard LCM uses big-endian (network byte order) for the header.
-
+# -- LCM constants ------------------------------------------------------------
 LCM_MAGIC = 0x4C433032  # "LC02" in ASCII / big-endian
+MCAST_GRP = "239.255.76.67"
+MCAST_PORT = 7667
 _seq = 0
+
+# -- LCM packet codec (matches @dimos/msgs encodePacket / decodePacket) --------
 
 def encode_lcm_packet(channel: str, payload: bytes) -> bytes:
     """Encode an LCM binary packet (same format as @dimos/msgs encodePacket)."""
@@ -63,14 +61,13 @@ def decode_lcm_packet(data: bytes) -> tuple[str, bytes]:
     magic = struct.unpack_from(">I", data, 0)[0]
     if magic != LCM_MAGIC:
         raise ValueError(f"Bad magic: 0x{magic:08x}")
-    # Find null terminator after 8-byte header
     null_pos = data.index(0, 8)
     channel = data[8:null_pos].decode("utf-8")
     payload = data[null_pos + 1:]
     return channel, payload
 
 
-# -- Channel names (must match DimSim's dimosBridge.ts) ----------------------
+# -- Channel names (must match DimSim's dimosBridge.ts) ------------------------
 CH_CMD_VEL = "/cmd_vel#geometry_msgs.Twist"
 CH_ODOM    = "/odom#geometry_msgs.PoseStamped"
 CH_IMAGE   = "/camera/image#sensor_msgs.Image"
@@ -78,99 +75,86 @@ CH_DEPTH   = "/camera/depth#sensor_msgs.Image"
 CH_LIDAR   = "/lidar/points#sensor_msgs.PointCloud2"
 
 
+def create_mcast_recv_socket() -> socket.socket:
+    """Create a UDP socket joined to the LCM multicast group for receiving."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except AttributeError:
+        pass
+    sock.bind(("", MCAST_PORT))
+    mreq = struct.pack("4s4s", socket.inet_aton(MCAST_GRP), socket.inet_aton("0.0.0.0"))
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
+    sock.settimeout(1.0)
+    return sock
+
+
+def create_mcast_send_socket() -> socket.socket:
+    """Create a UDP socket for sending to the LCM multicast group."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
+    return sock
+
+
 def main():
-    parser = argparse.ArgumentParser(description="DimSim ↔ dimos integration test")
-    parser.add_argument("--ws", default="ws://localhost:8090", help="Bridge WebSocket URL")
+    parser = argparse.ArgumentParser(description="DimSim ↔ dimos integration test (UDP multicast)")
     parser.add_argument("--timeout", type=int, default=30, help="Timeout in seconds")
     parser.add_argument("--rate", type=int, default=10, help="cmd_vel publish rate (Hz)")
     args = parser.parse_args()
 
     received = {"odom": 0, "image": 0, "depth": 0, "lidar": 0}
-    eval_task = {"prompt": None, "workflow": None}
     tick = 0
     success = False
-    ws_connected = threading.Event()
+    running = True
 
-    # -- WebSocket callbacks ---------------------------------------------------
-    def on_message(ws_app, data):
-        # Text messages = eval harness commands (task prompt, workflow lifecycle)
-        if isinstance(data, str):
-            try:
-                msg = json.loads(data)
-                if msg.get("type") == "startWorkflow":
-                    wf = msg.get("workflow", {})
-                    eval_task["prompt"] = wf.get("task")
-                    eval_task["workflow"] = wf.get("name")
-                    print(f"\n[integration] *** EVAL TASK RECEIVED ***")
-                    print(f"[integration]   Workflow: {eval_task['workflow']}")
-                    print(f"[integration]   Prompt:   {eval_task['prompt']}")
-                    print(f"[integration] *** A real dimos agent would use this prompt with its VLM ***\n")
-                elif msg.get("type") == "workflowComplete":
-                    scores = msg.get("rubricScores", {})
-                    passed = all(s.get("pass", True) for s in scores.values())
-                    print(f"\n[integration] *** EVAL RESULT: {'PASS' if passed else 'FAIL'} ***")
-                    print(f"[integration]   Scores: {json.dumps(scores, indent=2)}\n")
-                elif msg.get("type") in ("loadEnv", "envReady", "workflowStarted"):
-                    print(f"[integration] Eval event: {msg.get('type')}")
-            except (json.JSONDecodeError, KeyError):
-                pass
-            return
+    recv_sock = create_mcast_recv_socket()
+    send_sock = create_mcast_send_socket()
 
-        if not isinstance(data, bytes):
-            return
-        try:
-            channel, payload = decode_lcm_packet(data)
-        except (ValueError, IndexError):
-            return
-
-        if "/odom" in channel:
-            received["odom"] += 1
-            if received["odom"] <= 3 or received["odom"] % 10 == 0:
-                # Try to extract position from payload (skip 8-byte fingerprint + header)
-                print(f"[integration] Got odom #{received['odom']} ({len(payload)} bytes)")
-        elif "/camera/image" in channel:
-            received["image"] += 1
-            if received["image"] <= 3 or received["image"] % 10 == 0:
-                print(f"[integration] Got RGB #{received['image']} ({len(payload)} bytes)")
-        elif "/camera/depth" in channel:
-            received["depth"] += 1
-            if received["depth"] <= 3 or received["depth"] % 10 == 0:
-                print(f"[integration] Got depth #{received['depth']} ({len(payload)} bytes)")
-        elif "/lidar/points" in channel:
-            received["lidar"] += 1
-            if received["lidar"] <= 3 or received["lidar"] % 10 == 0:
-                print(f"[integration] Got LiDAR #{received['lidar']} ({len(payload)} bytes)")
-
-    def on_open(ws_app):
-        print(f"[integration] WebSocket connected to {args.ws}")
-        ws_connected.set()
-
-    def on_error(ws_app, error):
-        print(f"[integration] WebSocket error: {error}")
-
-    def on_close(ws_app, close_code, close_msg):
-        print("[integration] WebSocket closed")
-
-    # -- Start WebSocket in background thread ---------------------------------
-    ws = websocket.WebSocketApp(
-        args.ws,
-        on_open=on_open,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close,
-    )
-    ws_thread = threading.Thread(target=ws.run_forever, daemon=True)
-    ws_thread.start()
-
-    if not ws_connected.wait(timeout=5):
-        print("[integration] Failed to connect to WebSocket. Is the bridge running?")
-        sys.exit(1)
-
-    # -- Publish cmd_vel and monitor results ----------------------------------
-    interval = 1.0 / args.rate
-    print(f"[integration] Publishing /cmd_vel at {args.rate} Hz (Three.js identity frame)")
+    print(f"[integration] LCM multicast {MCAST_GRP}:{MCAST_PORT}")
+    print(f"[integration] Publishing /cmd_vel at {args.rate} Hz")
+    print(f"[integration] Listening for sensor data on multicast")
     print(f"[integration] Timeout: {args.timeout}s\n")
 
+    # -- Receive thread --------------------------------------------------------
+    def recv_loop():
+        while running:
+            try:
+                data, addr = recv_sock.recvfrom(65536)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+
+            try:
+                channel, payload = decode_lcm_packet(data)
+            except (ValueError, IndexError):
+                continue
+
+            if "/odom" in channel:
+                received["odom"] += 1
+                if received["odom"] <= 3 or received["odom"] % 10 == 0:
+                    print(f"[integration] Got odom #{received['odom']} ({len(payload)}B)")
+            elif "/camera/image" in channel:
+                received["image"] += 1
+                if received["image"] <= 3 or received["image"] % 10 == 0:
+                    print(f"[integration] Got RGB #{received['image']} ({len(payload)}B)")
+            elif "/camera/depth" in channel:
+                received["depth"] += 1
+                if received["depth"] <= 3 or received["depth"] % 10 == 0:
+                    print(f"[integration] Got depth #{received['depth']} ({len(payload)}B)")
+            elif "/lidar/points" in channel:
+                received["lidar"] += 1
+                if received["lidar"] <= 3 or received["lidar"] % 10 == 0:
+                    print(f"[integration] Got LiDAR #{received['lidar']} ({len(payload)}B)")
+
+    recv_thread = threading.Thread(target=recv_loop, daemon=True)
+    recv_thread.start()
+
+    # -- Send loop -------------------------------------------------------------
+    interval = 1.0 / args.rate
     start_time = time.time()
 
     try:
@@ -182,7 +166,7 @@ def main():
             )
             payload = twist.lcm_encode()
             packet = encode_lcm_packet(CH_CMD_VEL, payload)
-            ws.send(packet, opcode=websocket.ABNF.OPCODE_BINARY)
+            send_sock.sendto(packet, (MCAST_GRP, MCAST_PORT))
             tick += 1
 
             if tick <= 3 or tick % 20 == 0:
@@ -200,12 +184,14 @@ def main():
                     success = True
                     print("\n========================================")
                     print("  SUCCESS: All channels working!")
-                    print("  DimSim ↔ dimos transport verified.")
+                    print("  DimSim ↔ dimos LCM multicast verified.")
                     print("========================================\n")
                     break
 
                 if received["odom"] == 0 and elapsed > 10:
-                    print("[integration] No sensor data. Is the browser open at localhost:8090?")
+                    print("[integration] No sensor data on multicast. Check:")
+                    print("  1. Bridge running with vendored @dimos/lcm (joinMulticastV4)")
+                    print("  2. Browser open at localhost:8090 with scene loaded")
                 print()
 
             time.sleep(interval)
@@ -216,28 +202,21 @@ def main():
                   f"rgb={received['image']} depth={received['depth']} "
                   f"lidar={received['lidar']}")
 
-            if all(v == 0 for v in received.values()):
-                print("\n[integration] No data received. Check:")
-                print("  1. Bridge running:  ~/.deno/bin/deno run --allow-all --unstable-net dimos-cli/cli.ts dev")
-                print("  2. Browser open at http://localhost:8090 with scene loaded")
-                print("  3. Browser tab is in foreground (rAF needs focus)")
-            elif received["odom"] > 0 and received["image"] == 0:
-                print("\n[integration] Odom works but no sensor images.")
-                print("  Check browser console for [DimosBridge] errors.")
-
     except KeyboardInterrupt:
         print("\n[integration] Interrupted by user")
 
     finally:
+        running = False
         # Send zero velocity (safety stop)
         try:
             stop_twist = Twist()
             stop_pkt = encode_lcm_packet(CH_CMD_VEL, stop_twist.lcm_encode())
-            ws.send(stop_pkt, opcode=websocket.ABNF.OPCODE_BINARY)
+            send_sock.sendto(stop_pkt, (MCAST_GRP, MCAST_PORT))
         except Exception:
             pass
 
-        ws.close()
+        recv_sock.close()
+        send_sock.close()
         print("[integration] Done.")
 
     sys.exit(0 if success else 1)

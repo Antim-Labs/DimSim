@@ -5,7 +5,6 @@ import { PointerLockControls } from "three/examples/jsm/controls/PointerLockCont
 import { AiAvatar } from "./AiAvatar.js";
 import { ACTIONS as SIM_VLM_ACTIONS, DEFAULTS as SIM_VLM_DEFAULTS } from "./ai/sim/vlmActions.js";
 import { buildPrompt as buildSimVlmPrompt } from "./ai/sim/vlmPrompt.js";
-import { MODEL_CONFIG } from "./ai/modelConfig.js";
 import { requestVlmDecision } from "./ai/vlmClient.js";
 import { captureAgentPovBase64, processPendingCaptures, hasPendingCapture } from "./ai/visionCapture.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
@@ -17,7 +16,6 @@ const IS_SIM_ONLY_PROFILE = true;
 const ACTIVE_VLM_ACTIONS = SIM_VLM_ACTIONS;
 const ACTIVE_VLM_DEFAULTS = SIM_VLM_DEFAULTS;
 const buildActiveVlmPrompt = () => buildSimVlmPrompt({ actions: ACTIVE_VLM_ACTIONS });
-const resolveActiveVlmModel = () => (IS_SIM_ONLY_PROFILE ? MODEL_CONFIG.simMode : MODEL_CONFIG.editorMode);
 
 let threeRendererRef = null;
 let threeSceneRef = null;
@@ -38,7 +36,6 @@ let flyMode = true;
 let ghostMode = false;
 let voxelGrid = null; // { NX, NY, NZ, voxel, min, occ }
 let characterController = null;
-let _rapierStepFaultCount = 0;
 let walkVerticalVel = 0;
 let aiAgents = [];
 
@@ -223,18 +220,6 @@ const slDistanceValEl = document.getElementById("sl-distance-val");
 const slShadowRowEl = document.getElementById("sl-shadow-row");
 const slShadowEl = document.getElementById("sl-shadow");
 const slEnabledEl = document.getElementById("sl-enabled");
-const slSkyControlsEl = document.getElementById("sl-sky-controls");
-const slSkyTopColorEl = document.getElementById("sl-sky-top-color");
-const slSkyHorizonColorEl = document.getElementById("sl-sky-horizon-color");
-const slSkyBottomColorEl = document.getElementById("sl-sky-bottom-color");
-const slSkyBrightnessEl = document.getElementById("sl-sky-brightness");
-const slSkyBrightnessValEl = document.getElementById("sl-sky-brightness-val");
-const slSkySoftnessEl = document.getElementById("sl-sky-softness");
-const slSkySoftnessValEl = document.getElementById("sl-sky-softness-val");
-const slSkySunStrengthEl = document.getElementById("sl-sky-sun-strength");
-const slSkySunStrengthValEl = document.getElementById("sl-sky-sun-strength-val");
-const slSkySunHeightEl = document.getElementById("sl-sky-sun-height");
-const slSkySunHeightValEl = document.getElementById("sl-sky-sun-height-val");
 
 // Details panel + Transform XYZ elements
 const detailsPanelEl = document.getElementById("details-panel");
@@ -323,7 +308,6 @@ const assetToolScaleBtn = document.getElementById("asset-tool-scale");
 const builderStateEditorEl = document.getElementById("builder-state-editor");
 const agentPanelEl = document.getElementById("agent-panel");
 const agentLastEl = document.getElementById("agent-last");
-const agentObservationEl = document.getElementById("agent-observation");
 const agentShotImgEl = document.getElementById("agent-shot-img");
 const agentReqMetaEl = document.getElementById("agent-req-meta");
 const agentReqPromptEl = document.getElementById("agent-req-prompt");
@@ -354,10 +338,16 @@ const simLidarNoiseBtn = document.getElementById("sim-lidar-noise");
 const simLidarMultiReturnBtn = document.getElementById("sim-lidar-multireturn");
 
 // Tagging / annotation state
-const HAS_EDITOR_PANEL = !!document.getElementById("tag-panel");
-const HAS_SIM_PANEL = !!document.getElementById("agent-panel");
-let appMode = HAS_EDITOR_PANEL ? (localStorage.getItem("sparkWorldMode") ?? "sim") : "sim"; // "sim" | "edit"
+let appMode = localStorage.getItem("sparkWorldMode") ?? "sim"; // "sim" | "edit"
 const isStagingEditor = new URLSearchParams(window.location.search).get("staging") === "1";
+
+// ── dimos integration mode ──────────────────────────────────────────────────
+// Activated via ?dimos=1 URL param or window.__dimosMode (injected by Deno bridge server).
+// When active: internal VLM loop disabled, agent pose driven by external /odom,
+// sensor data (RGB, depth, LiDAR) published as LCM packets via WebSocket bridge.
+const _dimosParams = new URLSearchParams(window.location.search);
+const dimosMode = _dimosParams.get("dimos") === "1" || window.__dimosMode === true;
+const dimosScene = _dimosParams.get("scene") || window.__dimosScene || null;
 let currentWorkspace = "scene"; // "scene" | "assetBuilder"
 const workspaceSnapshots = { scene: null, assetBuilder: null };
 const ASSET_LIBRARY_KEY = "sparkWorldAssetLibrary";
@@ -385,59 +375,6 @@ let lidarOrderedDebugView = false; // false=unordered 3D cloud, true=ordered rin
 let lidarNoiseEnabled = false; // deterministic range noise + dropouts
 let lidarMultiReturnMode = "strongest"; // "strongest" | "last"
 let worldKey = localStorage.getItem("sparkWorldLastWorldKey") ?? "default";
-
-function clampNum(v, min, max) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return min;
-  return Math.min(max, Math.max(min, n));
-}
-
-function normalizeHexColor(value, fallback) {
-  try {
-    return `#${new THREE.Color(value).getHexString()}`;
-  } catch {
-    return fallback;
-  }
-}
-
-function createDefaultSceneSettings() {
-  return {
-    sky: {
-      enabled: false,
-      topColor: "#7aa9ff",
-      horizonColor: "#cfe5ff",
-      bottomColor: "#f4f8ff",
-      brightness: 1.0,
-      softness: 1.35,
-      sunStrength: 0.18,
-      sunHeight: 0.45,
-    },
-  };
-}
-
-function normalizeSceneSettings(raw) {
-  const defaults = createDefaultSceneSettings();
-  const src = raw && typeof raw === "object" ? raw : {};
-  const srcSky = src.sky && typeof src.sky === "object" ? src.sky : {};
-  return {
-    sky: {
-      enabled: !!srcSky.enabled,
-      topColor: normalizeHexColor(srcSky.topColor, defaults.sky.topColor),
-      horizonColor: normalizeHexColor(srcSky.horizonColor, defaults.sky.horizonColor),
-      bottomColor: normalizeHexColor(srcSky.bottomColor, defaults.sky.bottomColor),
-      brightness: clampNum(srcSky.brightness, 0.2, 2.0),
-      softness: clampNum(srcSky.softness, 0.2, 3.0),
-      sunStrength: clampNum(srcSky.sunStrength, 0.0, 1.0),
-      sunHeight: clampNum(srcSky.sunHeight, -0.2, 1.0),
-    },
-  };
-}
-
-function serializeSceneSettings() {
-  return normalizeSceneSettings(sceneSettings);
-}
-
-let sceneSettings = createDefaultSceneSettings();
 let tags = [];
 let selectedTagId = null;
 let draftTag = null; // tag being edited/created
@@ -558,7 +495,6 @@ let groupChildMeshes = [];    // meshes currently reparented to groupPivot
 const _assetBumpVelocities = new Map(); // assetId -> THREE.Vector3
 const _playerPosPrevForBump = new THREE.Vector3();
 let _playerPosPrevForBumpValid = false;
-const _agentPosPrevForBump = new Map(); // agentId -> THREE.Vector3
 let _lastBumpSaveAt = 0;
 let _lastBumpColliderSyncAt = 0;
 const primitivesGroup = new THREE.Group();
@@ -695,7 +631,7 @@ let agentTaskTargetId = null;
 let vibeCreatorApi = null;
 let agentBadgeLayerEl = null;
 const agentBadgeElsById = new Map();
-const EDITOR_TASK_WORKER_TARGET = 1;
+const EDITOR_TASK_WORKER_TARGET = 3;
 const EDITOR_MAX_AGENT_COUNT = 4;
 
 // Collision settings (simplified - always use GLB TriMesh)
@@ -838,7 +774,7 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.setSize(window.innerWidth, window.innerHeight, false);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.1;
+renderer.toneMappingExposure = 1.25;
 
 // Shadows: OFF by default. Enabled dynamically only when a light actually casts shadows.
 // BasicShadowMap is fully deterministic (no PCF/stochastic filtering).
@@ -898,64 +834,12 @@ const headLamp = new THREE.PointLight(0xffffff, 1.4, 26, 1.5);
 headLamp.position.set(0, 1.0, 0.6);
 camera.add(headLamp);
 
-// Lightweight procedural sky dome (single draw call). This is intentionally
-// simple so it remains cheap for scale/headless workloads.
-const skyUniforms = {
-  uTop: { value: new THREE.Color("#7aa9ff") },
-  uHorizon: { value: new THREE.Color("#cfe5ff") },
-  uBottom: { value: new THREE.Color("#f4f8ff") },
-  uBrightness: { value: 1.0 },
-  uSoftness: { value: 1.35 },
-  uSunStrength: { value: 0.18 },
-  uSunDir: { value: new THREE.Vector3(0, 0.45, -1).normalize() },
-};
-const skyDome = new THREE.Mesh(
-  new THREE.SphereGeometry(220, 24, 16),
-  new THREE.ShaderMaterial({
-    uniforms: skyUniforms,
-    side: THREE.BackSide,
-    depthWrite: false,
-    vertexShader: `
-      varying vec3 vWorldDir;
-      void main() {
-        vec4 worldPos = modelMatrix * vec4(position, 1.0);
-        vWorldDir = normalize(worldPos.xyz - cameraPosition);
-        gl_Position = projectionMatrix * viewMatrix * worldPos;
-      }
-    `,
-    fragmentShader: `
-      varying vec3 vWorldDir;
-      uniform vec3 uTop;
-      uniform vec3 uHorizon;
-      uniform vec3 uBottom;
-      uniform float uBrightness;
-      uniform float uSoftness;
-      uniform float uSunStrength;
-      uniform vec3 uSunDir;
-      void main() {
-        float h = clamp(vWorldDir.y * 0.5 + 0.5, 0.0, 1.0);
-        float shaped = pow(h, max(0.15, uSoftness));
-        vec3 col = mix(uBottom, uHorizon, smoothstep(0.0, 0.55, shaped));
-        col = mix(col, uTop, smoothstep(0.45, 1.0, shaped));
-        float sun = pow(max(dot(normalize(vWorldDir), normalize(uSunDir)), 0.0), 220.0);
-        col += vec3(1.0, 0.92, 0.78) * sun * uSunStrength;
-        gl_FragColor = vec4(col * uBrightness, 1.0);
-      }
-    `,
-  })
-);
-skyDome.frustumCulled = false;
-skyDome.renderOrder = -1000;
-skyDome.visible = false;
-scene.add(skyDome);
-
 // Registry of built-in scene lights so the editor can expose them
 const sceneLights = [
   { id: "_ambient",  label: "Ambient",     obj: ambientLight, type: "ambient" },
   { id: "_hemi",     label: "Hemisphere",   obj: hemi,         type: "hemisphere" },
   { id: "_dir",      label: "Directional",  obj: dir,          type: "directional" },
   { id: "_headlamp", label: "Head Lamp",    obj: headLamp,     type: "point" },
-  { id: "_sky",      label: "Sky",          obj: skyDome,      type: "sky" },
 ];
 scene.add(camera);
 
@@ -1003,27 +887,6 @@ scene.add(placementGhostGroup);
 // -----------------------------------------------------------------------------
 const DEFAULT_SCENE_BG = new THREE.Color(0x06070a);
 const RGBD_BG = new THREE.Color(0x000000);
-function applySceneSkySettings() {
-  const s = normalizeSceneSettings(sceneSettings).sky;
-  sceneSettings.sky = s;
-  skyUniforms.uTop.value.set(s.topColor);
-  skyUniforms.uHorizon.value.set(s.horizonColor);
-  skyUniforms.uBottom.value.set(s.bottomColor);
-  skyUniforms.uBrightness.value = s.brightness;
-  skyUniforms.uSoftness.value = s.softness;
-  skyUniforms.uSunStrength.value = s.sunStrength;
-  skyUniforms.uSunDir.value.set(0, s.sunHeight, -1).normalize();
-}
-function applySceneRgbBackground() {
-  if (sceneSettings.sky.enabled) {
-    skyDome.visible = true;
-    scene.background = null;
-  } else {
-    skyDome.visible = false;
-    scene.background = DEFAULT_SCENE_BG;
-  }
-}
-applySceneSkySettings();
 // RGB-D visualization range tuned for indoor robotics scenes (meters).
 const RGBD_MIN_DEPTH_M = 0.2;
 const RGBD_MAX_DEPTH_M = 12.0;
@@ -1344,15 +1207,15 @@ function renderRgbdView(enableAutoRange = true) {
   renderer.render(rgbdVizScene, rgbdPostCamera);
 }
 
-function renderRgbdMetricPassOffscreen() {
-  rgbdMetricMaterial.uniforms.uNear.value = camera.near;
-  rgbdMetricMaterial.uniforms.uFar.value = camera.far;
+function renderRgbdMetricPassOffscreen(cam = camera) {
+  rgbdMetricMaterial.uniforms.uNear.value = cam.near;
+  rgbdMetricMaterial.uniforms.uFar.value = cam.far;
   rgbdMetricMaterial.uniforms.uNoiseEnabled.value = rgbdNoiseEnabled ? 1.0 : 0.0;
   rgbdMetricMaterial.uniforms.uSpeckleEnabled.value = rgbdSpeckleEnabled ? 1.0 : 0.0;
   if (!_rgbdNearFarAsserted) {
     console.assert(
-      Math.abs(rgbdMetricMaterial.uniforms.uNear.value - camera.near) < 1e-9 &&
-      Math.abs(rgbdMetricMaterial.uniforms.uFar.value - camera.far) < 1e-9,
+      Math.abs(rgbdMetricMaterial.uniforms.uNear.value - cam.near) < 1e-9 &&
+      Math.abs(rgbdMetricMaterial.uniforms.uFar.value - cam.far) < 1e-9,
       "[RGB-D] Reconstruction near/far must match active camera near/far."
     );
     _rgbdNearFarAsserted = true;
@@ -1382,7 +1245,7 @@ function renderRgbdMetricPassOffscreen() {
   renderer.setRenderTarget(rgbdDepthTarget);
   renderer.setClearColor(0x000000, RGBD_CLEAR_ALPHA);
   renderer.clear(true, true, true);
-  renderer.render(scene, camera);
+  renderer.render(scene, cam);
 
   renderer.setRenderTarget(rgbdMetricTarget);
   renderer.setClearColor(0x000000, RGBD_CLEAR_ALPHA);
@@ -1621,9 +1484,22 @@ function nowNs() {
 }
 
 function pushLidarPoseSample(stampNs = nowNs()) {
-  const pos = camera.getWorldPosition(new THREE.Vector3());
-  const camQuat = camera.getWorldQuaternion(new THREE.Quaternion());
-  const quat = camQuat.clone().multiply(_lidarToCamQuat);
+  let pos, quat;
+  const dimosAgent = dimosMode && window.__dimosAgent;
+  if (dimosAgent) {
+    // In dimos mode, sample from the agent's body position + orientation
+    const [ax, ay, az] = dimosAgent.getPosition?.() || [0, 0, 0];
+    const eyeY = ay + PLAYER_EYE_HEIGHT * 0.9;
+    pos = new THREE.Vector3(ax, eyeY, az);
+    const yaw = dimosAgent.group?.rotation?.y ?? 0;
+    // Build quaternion from agent yaw (rotation about Y axis)
+    const agentQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+    quat = agentQuat.multiply(_lidarToCamQuat);
+  } else {
+    pos = camera.getWorldPosition(new THREE.Vector3());
+    const camQuat = camera.getWorldQuaternion(new THREE.Quaternion());
+    quat = camQuat.clone().multiply(_lidarToCamQuat);
+  }
   _lidarPoseHistory.push({ stampNs, pos, quat });
   const minNs = stampNs - LIDAR_POSE_HISTORY_NS;
   while (_lidarPoseHistory.length > 2 && _lidarPoseHistory[0].stampNs < minNs) {
@@ -2176,7 +2052,7 @@ function resetLidarScanState() {
 }
 
 function updateLidarPointCloud() {
-  if (!rapierWorld || !RAPIER || simSensorViewMode !== "lidar") return;
+  if (!rapierWorld || !RAPIER || (simSensorViewMode !== "lidar" && !dimosMode)) return;
 
   if (_lidarUseKnownGoodDebugCloud) {
     resetLidarScanState();
@@ -2506,7 +2382,7 @@ function applySimSensorViewMode() {
     _lidarAccumFrames.length = 0;
     _lidarLastAccumPose = null;
     resetLidarScanState();
-    applySceneRgbBackground();
+    scene.background = DEFAULT_SCENE_BG;
   } else if (simSensorViewMode === "rgbd") {
     // RGB-D mode: render scene depth to offscreen target, then post-process to
     // metric camera-space Z visualization. Do not override scene materials.
@@ -2524,7 +2400,6 @@ function applySimSensorViewMode() {
     _lidarAccumFrames.length = 0;
     _lidarLastAccumPose = null;
     resetLidarScanState();
-    skyDome.visible = false;
     scene.background = RGBD_BG;
   } else {
     // LiDAR mode: hide scene visuals and render deterministic point cloud only.
@@ -2538,7 +2413,6 @@ function applySimSensorViewMode() {
     tagsGroup.visible = false;
     lidarVizGroup.visible = true;
     rgbdPcOverlayGroup.visible = rgbdPcOverlayOnLidar && _rgbdPcOverlayLastCount > 0;
-    skyDome.visible = false;
     scene.background = RGBD_BG;
   }
   updateSimSensorButtons();
@@ -2652,7 +2526,6 @@ function loadTagsForWorld() {
       primitives = Array.isArray(state.primitives) ? state.primitives : [];
       editorLights = Array.isArray(state.lights) ? state.lights : [];
       groups = Array.isArray(state.groups) ? state.groups : [];
-      sceneSettings = normalizeSceneSettings(state.sceneSettings);
     } else {
       // Backwards compat: tags-only storage
       const raw = localStorage.getItem("sparkWorldTagsByWorld");
@@ -2662,7 +2535,6 @@ function loadTagsForWorld() {
       primitives = [];
       editorLights = [];
       groups = [];
-      sceneSettings = createDefaultSceneSettings();
     }
   } catch {
     tags = [];
@@ -2670,7 +2542,6 @@ function loadTagsForWorld() {
     primitives = [];
     editorLights = [];
     groups = [];
-    sceneSettings = createDefaultSceneSettings();
   }
   selectedTagId = null;
   draftTag = null;
@@ -2688,8 +2559,6 @@ function loadTagsForWorld() {
   rebuildAllEditorLights();
   renderLightsList();
   renderLightProps();
-  applySceneSkySettings();
-  applySceneRgbBackground();
 }
 
 function saveTagsForWorld() {
@@ -2763,14 +2632,7 @@ function saveTagsForWorld() {
       return rest;
     });
 
-    byWorld[worldKey] = {
-      tags,
-      assets: lightweightAssets,
-      primitives: savePrimitives,
-      lights: saveLights,
-      groups,
-      sceneSettings: serializeSceneSettings(),
-    };
+    byWorld[worldKey] = { tags, assets: lightweightAssets, primitives: savePrimitives, lights: saveLights, groups };
     const dataStr = JSON.stringify(byWorld);
     
     // Check size before saving (localStorage limit is typically 5MB)
@@ -2794,7 +2656,7 @@ function saveTagsForWorld() {
           destinationWorld: a.destinationWorld, linkedPortalId: a.linkedPortalId,
           linkedPortalPosition: a.linkedPortalPosition, currentStateId: a.currentStateId,
           transform: a.transform, states: [], actions: a.actions || [],
-        })), sceneSettings: serializeSceneSettings() };
+        }))};
         localStorage.setItem("sparkWorldStateByWorld", JSON.stringify(freshData));
         console.log("[SAVE] Saved portals only after clearing old data");
       } catch (e2) {
@@ -2855,11 +2717,11 @@ function applyEditorGuideVisibility() {
 }
 
 function setAppMode(mode) {
-  let target = mode === "edit" ? "edit" : "sim";
-  // Clamp mode to what this page can actually render.
-  // This prevents leaking a stored "edit" mode into sim-only pages.
-  if (target === "edit" && !HAS_EDITOR_PANEL) target = "sim";
-  if (target === "sim" && !HAS_SIM_PANEL) target = "edit";
+  const target = mode === "edit" ? "edit" : "sim";
+  // Guard: if the target mode's panel doesn't exist in the DOM, stay in current mode.
+  // This prevents mode switching in the standalone editor.html or sim.html pages.
+  if (target === "sim" && !document.getElementById("agent-panel")) return;
+  if (target === "edit" && !document.getElementById("tag-panel")) return;
   appMode = target;
   localStorage.setItem("sparkWorldMode", appMode);
   document.documentElement.dataset.mode = appMode;
@@ -2986,31 +2848,6 @@ function agentUiSetShot(base64) {
   if (editShot) editShot.src = src;
 }
 
-function extractObservationText(parsed, raw) {
-  const p = parsed && typeof parsed === "object" ? parsed : {};
-  const observation =
-    (typeof p.observation === "string" && p.observation) ||
-    (typeof p.obs === "string" && p.obs) ||
-    (typeof p.perception === "string" && p.perception) ||
-    (typeof p.sceneObservation === "string" && p.sceneObservation) ||
-    (typeof p.visualObservation === "string" && p.visualObservation) ||
-    (typeof p.params?.observation === "string" && p.params.observation) ||
-    "";
-  if (observation.trim()) return observation.trim();
-
-  if (typeof raw === "string" && raw.trim()) {
-    const m = raw.match(/"observation"\s*:\s*"([^"]+)"/i);
-    if (m?.[1]) return m[1];
-  }
-  return "";
-}
-
-function agentUiSetObservation(text) {
-  const value = String(text || "").trim();
-  if (!agentObservationEl) return;
-  agentObservationEl.textContent = value || "No observation in latest response.";
-}
-
 function agentUiSetRequest({ endpoint, model, prompt, context, imageBytes, messages }) {
   const metaText = `endpoint: ${endpoint}\nmodel: ${model}\nimageBytes: ${imageBytes ?? "?"}\nworld: ${worldKey}`;
   if (agentReqMetaEl) agentReqMetaEl.textContent = metaText;
@@ -3059,7 +2896,6 @@ function agentUiSetResponse({ raw, parsed }) {
   const editRaw = document.getElementById("edit-agent-resp-raw");
   if (editRaw) editRaw.textContent = raw || "";
   if (agentLastEl) agentLastEl.textContent = JSON.stringify(parsed ?? {}, null, 2);
-  agentUiSetObservation(extractObservationText(parsed, raw));
   const editLast = document.getElementById("edit-agent-last");
   if (editLast) editLast.textContent = JSON.stringify(parsed ?? {}, null, 2);
 }
@@ -3071,7 +2907,6 @@ function clearAgentInspectorViews() {
   if (agentReqContextEl) agentReqContextEl.textContent = "";
   if (agentRespRawEl) agentRespRawEl.textContent = "";
   if (agentLastEl) agentLastEl.textContent = "Waiting...";
-  if (agentObservationEl) agentObservationEl.textContent = "Waiting for first observation...";
 
   const editShot = document.getElementById("edit-agent-shot-img");
   const editReqMeta = document.getElementById("edit-agent-req-meta");
@@ -3279,15 +3114,16 @@ function renderAgentTaskUi() {
   if (!agentTaskStatusEl || !agentTaskInputEl || !agentTaskStartBtn || !agentTaskEndBtn) return;
 
   if (!agentTask.active) {
-    // Keep command bar clean: no persistent "Done (...)" suffixes.
-    agentTaskStatusEl.textContent = "";
+    agentTaskStatusEl.textContent = agentTask.finishedAt
+      ? `Done (${agentTask.finishedReason || "ok"})`
+      : "";
     agentTaskInputEl.disabled = false;
     // In edit mode we can auto-spawn worker agents when starting a task.
     agentTaskStartBtn.disabled = appMode === "edit" ? false : !hasAgent;
     agentTaskEndBtn.disabled = true;
     if (bar) bar.classList.remove("active");
   } else {
-    agentTaskStatusEl.textContent = "Running";
+    agentTaskStatusEl.textContent = "";
     agentTaskInputEl.disabled = true;
     agentTaskStartBtn.disabled = true;
     agentTaskEndBtn.disabled = false;
@@ -3418,7 +3254,7 @@ async function startAgentTask(instruction, { autoPool = true, targetAgentId = nu
   agentUiPush(`${new Date().toLocaleTimeString()}\nTASK START\n${text}${target ? ` [${target.id}]` : ` [${targets.length} agents]`}`);
   renderAgentTaskUi();
   
-  // Follow only when user selected agent camera mode.
+  // Follow agent camera only when user selected agent camera mode.
   if (appMode === "sim" && simUserCameraMode === "agent") enableAgentCameraFollow();
 }
 
@@ -7425,8 +7261,7 @@ function renderSceneLightsList() {
   for (const sl of sceneLights) {
     const el = document.createElement("div");
     el.className = "tag-item" + (sl.id === selectedSceneLightId ? " active" : "");
-    const isOn = sl.type === "sky" ? sceneSettings.sky.enabled : sl.obj.visible !== false;
-    const onOff = isOn ? "" : " (off)";
+    const onOff = sl.obj.visible !== false ? "" : " (off)";
     el.innerHTML = `${escapeHtml(sl.label)}${onOff}<small>${escapeHtml(sl.type)}</small>`;
     el.addEventListener("click", () => selectSceneLight(sl.id));
     sceneLightsListEl.appendChild(el);
@@ -7471,14 +7306,12 @@ function renderSceneLightProps() {
 
   const obj = sl.obj;
   const isShadowGround = sl.type === "shadow_ground";
-  const isSky = sl.type === "sky";
   if (slTitleEl) slTitleEl.textContent = sl.label;
-  if (slEnabledEl) slEnabledEl.checked = isSky ? !!sceneSettings?.sky?.enabled : obj.visible !== false;
+  if (slEnabledEl) slEnabledEl.checked = obj.visible !== false;
 
   // Shadow ground: repurpose intensity slider as opacity
   if (isShadowGround) {
     if (slColorEl) slColorEl.parentElement.classList.add("hidden");
-    if (slSkyControlsEl) slSkyControlsEl.classList.add("hidden");
     if (slIntensityEl) {
       slIntensityEl.min = "0";
       slIntensityEl.max = "1";
@@ -7495,32 +7328,7 @@ function renderSceneLightProps() {
     return;
   }
 
-  if (isSky) {
-    if (slColorEl) slColorEl.parentElement.classList.add("hidden");
-    if (slGroundRowEl) slGroundRowEl.classList.add("hidden");
-    if (slDistanceRowEl) slDistanceRowEl.classList.add("hidden");
-    if (slShadowRowEl) slShadowRowEl.classList.add("hidden");
-    if (slIntensityEl) slIntensityEl.parentElement.classList.add("hidden");
-    if (slSkyControlsEl) slSkyControlsEl.classList.remove("hidden");
-
-    const s = normalizeSceneSettings(sceneSettings).sky;
-    if (slSkyTopColorEl) slSkyTopColorEl.value = s.topColor;
-    if (slSkyHorizonColorEl) slSkyHorizonColorEl.value = s.horizonColor;
-    if (slSkyBottomColorEl) slSkyBottomColorEl.value = s.bottomColor;
-    if (slSkyBrightnessEl) slSkyBrightnessEl.value = String(s.brightness);
-    if (slSkyBrightnessValEl) slSkyBrightnessValEl.textContent = Number(s.brightness).toFixed(2);
-    if (slSkySoftnessEl) slSkySoftnessEl.value = String(s.softness);
-    if (slSkySoftnessValEl) slSkySoftnessValEl.textContent = Number(s.softness).toFixed(2);
-    if (slSkySunStrengthEl) slSkySunStrengthEl.value = String(s.sunStrength);
-    if (slSkySunStrengthValEl) slSkySunStrengthValEl.textContent = Number(s.sunStrength).toFixed(2);
-    if (slSkySunHeightEl) slSkySunHeightEl.value = String(s.sunHeight);
-    if (slSkySunHeightValEl) slSkySunHeightValEl.textContent = Number(s.sunHeight).toFixed(2);
-    return;
-  }
-
   // Normal light
-  if (slSkyControlsEl) slSkyControlsEl.classList.add("hidden");
-  if (slIntensityEl) slIntensityEl.parentElement.classList.remove("hidden");
   if (slColorEl) {
     slColorEl.parentElement.classList.remove("hidden");
     slColorEl.value = "#" + obj.color.getHexString();
@@ -7879,7 +7687,7 @@ function despawnEphemeralAgents(reason = "task-end") {
 
 function createAiAgent({ ephemeral = false } = {}) {
   const endpoint = localStorage.getItem("sparkWorldVlmEndpoint") || "/vlm/decision";
-  const model = resolveActiveVlmModel();
+  const model = ACTIVE_VLM_DEFAULTS.model;
   const nearbyRange = IS_SIM_ONLY_PROFILE ? 2.5 : appMode === "edit" ? 12 : 2.5;
   const id = `agent-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   let agentRef = null;
@@ -7896,13 +7704,12 @@ function createAiAgent({ ephemeral = false } = {}) {
     senseRadius: 3.0,
     walkSpeed: 2.0,
     vlm: {
+      // In dimos mode, VLM is disabled — agent pose is driven externally via /odom.
       // Ephemeral workers auto-enable; manually spawned agents start idle.
-      enabled: true,
-      showSpeechBubbleInScene: appMode !== "sim",
+      enabled: dimosMode ? false : true,
       holdPositionWhenIdle: true,
       endpoint,
       model,
-      getModel: resolveActiveVlmModel,
       actions: ACTIVE_VLM_ACTIONS,
       buildPrompt: () => buildActiveVlmPrompt(),
       request: requestVlmDecision,
@@ -9493,7 +9300,6 @@ tagsExportBtn?.addEventListener("click", () => {
     primitives: exportPrimitives,
     lights: exportLights,
     groups,
-    sceneSettings: serializeSceneSettings(),
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const a = document.createElement("a");
@@ -9515,9 +9321,6 @@ async function importLevelFromJSON(json, options = {}) {
   const importedPrimitives = Array.isArray(json?.primitives) ? json.primitives : [];
   const importedLights = Array.isArray(json?.lights) ? json.lights : [];
   const importedGroups = Array.isArray(json?.groups) ? json.groups : [];
-  const importedSceneSettings = json && typeof json === "object" && json.sceneSettings
-    ? normalizeSceneSettings(json.sceneSettings)
-    : null;
   if (!importedTags) throw new Error("Invalid level file.");
   // Detach group pivot before clearing
   detachGroupTransform();
@@ -9528,7 +9331,6 @@ async function importLevelFromJSON(json, options = {}) {
   primitives = importedPrimitives;
   editorLights = importedLights;
   groups = importedGroups;
-  if (importedSceneSettings) sceneSettings = importedSceneSettings;
   selectedGroupId = null;
   if (!options.skipWorldSave) saveTagsForWorld();
   rebuildTagMarkers();
@@ -9542,8 +9344,6 @@ async function importLevelFromJSON(json, options = {}) {
   renderTagPanel();
   renderPrimitiveProps();
   renderLightProps();
-  applySceneSkySettings();
-  applySceneRgbBackground();
   updateOutlinerCounts();
   syncShadowMapEnabled();
 }
@@ -9568,20 +9368,11 @@ function captureCurrentLevelSnapshot() {
     primitives: exportPrimitives,
     lights: exportLights,
     groups: [...groups],
-    sceneSettings: serializeSceneSettings(),
   };
 }
 
 function emptyBuilderSnapshot() {
-  return {
-    version: "2.0",
-    tags: [],
-    assets: [],
-    primitives: [],
-    lights: [],
-    groups: [],
-    sceneSettings: serializeSceneSettings(),
-  };
+  return { version: "2.0", tags: [], assets: [], primitives: [], lights: [], groups: [] };
 }
 
 function updateWorkspaceTabUi() {
@@ -9589,7 +9380,7 @@ function updateWorkspaceTabUi() {
   workspaceTabSceneBtn?.classList.toggle("active", !inBuilder);
   workspaceTabAssetBuilderBtn?.classList.toggle("active", inBuilder);
   document.body.classList.toggle("staging-mode", inBuilder);
-  if (assetBuilderGrid) assetBuilderGrid.visible = inBuilder && appMode === "edit";
+  if (assetBuilderGrid) assetBuilderGrid.visible = inBuilder;
   // Legacy toolbar save actions are hidden — panel is canonical save flow.
   document.getElementById("staging-publish-sep")?.classList.add("hidden");
   document.getElementById("staging-publish-asset-btn")?.classList.add("hidden");
@@ -10493,9 +10284,7 @@ lightDeleteBtn?.addEventListener("click", () => {
 // Scene light property handlers
 slColorEl?.addEventListener("input", () => {
   const sl = getSelectedSceneLight();
-  if (sl && sl.type !== "sky") {
-    sl.obj.color.set(slColorEl.value);
-  }
+  if (sl) { sl.obj.color.set(slColorEl.value); }
 });
 
 slIntensityEl?.addEventListener("input", () => {
@@ -10506,7 +10295,6 @@ slIntensityEl?.addEventListener("input", () => {
     sl.obj.material.opacity = parseFloat(slIntensityEl.value);
     if (slIntensityValEl) slIntensityValEl.textContent = sl.obj.material.opacity.toFixed(2);
   } else {
-    if (sl.type === "sky") return;
     sl.obj.intensity = parseFloat(slIntensityEl.value);
     if (slIntensityValEl) slIntensityValEl.textContent = sl.obj.intensity.toFixed(2);
   }
@@ -10538,52 +10326,10 @@ slShadowEl?.addEventListener("change", () => {
 slEnabledEl?.addEventListener("change", () => {
   const sl = getSelectedSceneLight();
   if (sl) {
-    if (sl.type === "sky") {
-      const s = normalizeSceneSettings(sceneSettings);
-      s.sky.enabled = !!slEnabledEl.checked;
-      sceneSettings = s;
-      applySceneRgbBackground();
-    } else {
-      sl.obj.visible = slEnabledEl.checked;
-    }
+    sl.obj.visible = slEnabledEl.checked;
     renderSceneLightsList();
     syncShadowMapEnabled();
-    saveTagsForWorld();
   }
-});
-
-function updateSkySettingFromUi(mutator) {
-  const sl = getSelectedSceneLight();
-  if (!sl || sl.type !== "sky") return;
-  const s = normalizeSceneSettings(sceneSettings);
-  mutator(s.sky);
-  sceneSettings = s;
-  applySceneSkySettings();
-  applySceneRgbBackground();
-  renderSceneLightProps();
-  saveTagsForWorld();
-}
-
-slSkyTopColorEl?.addEventListener("input", () => {
-  updateSkySettingFromUi((sky) => { sky.topColor = slSkyTopColorEl.value; });
-});
-slSkyHorizonColorEl?.addEventListener("input", () => {
-  updateSkySettingFromUi((sky) => { sky.horizonColor = slSkyHorizonColorEl.value; });
-});
-slSkyBottomColorEl?.addEventListener("input", () => {
-  updateSkySettingFromUi((sky) => { sky.bottomColor = slSkyBottomColorEl.value; });
-});
-slSkyBrightnessEl?.addEventListener("input", () => {
-  updateSkySettingFromUi((sky) => { sky.brightness = parseFloat(slSkyBrightnessEl.value) || 1.0; });
-});
-slSkySoftnessEl?.addEventListener("input", () => {
-  updateSkySettingFromUi((sky) => { sky.softness = parseFloat(slSkySoftnessEl.value) || 1.0; });
-});
-slSkySunStrengthEl?.addEventListener("input", () => {
-  updateSkySettingFromUi((sky) => { sky.sunStrength = parseFloat(slSkySunStrengthEl.value) || 0.0; });
-});
-slSkySunHeightEl?.addEventListener("input", () => {
-  updateSkySettingFromUi((sky) => { sky.sunHeight = parseFloat(slSkySunHeightEl.value) || 0.0; });
 });
 
 sceneLightPropsEl?.addEventListener("keydown", (e) => e.stopPropagation());
@@ -10970,7 +10716,6 @@ window.addEventListener("keyup", (e) => {
 // Optional reference ground (helps when no splat is loaded).
 grid = new THREE.GridHelper(50, 50, 0x233043, 0x121722);
 grid.position.y = 0;
-grid.visible = shouldShowEditorGuides();
 scene.add(grid);
 
 // Shadow catcher: a large transparent ground plane that only shows shadows.
@@ -11934,7 +11679,7 @@ function _hasBumpableAssets() {
   return false;
 }
 
-function updateBumpableAssets(dt, playerPos, agentPushers = []) {
+function updateBumpableAssets(dt, playerPos) {
   if (currentWorkspace !== "scene" || !playerPos || !_hasBumpableAssets()) {
     _playerPosPrevForBumpValid = false;
     return;
@@ -11990,26 +11735,6 @@ function updateBumpableAssets(dt, playerPos, agentPushers = []) {
       const driveSpeed = Math.max(speedXZ, intentPush ? 1.4 : 0);
       const intentBonus = inPushCone ? 0.35 : 0;
       const impulse = Math.min(2.4, (Math.max(0, penetration) * 3 + driveSpeed * 0.35 + intentBonus) * response);
-      vel.x += dirX * impulse;
-      vel.z += dirZ * impulse;
-    }
-    // AI agents can push bumpable assets as well.
-    for (const ap of agentPushers) {
-      const apPos = ap?.pos;
-      const apVel = ap?.vel;
-      if (!apPos || !apVel) continue;
-      const av = Math.hypot(apVel.x || 0, apVel.z || 0);
-      if (av <= 0.04) continue;
-      const adx = worldCenter.x - apPos.x;
-      const adz = worldCenter.z - apPos.z;
-      const adist = Math.hypot(adx, adz);
-      const aminDist = worldRadius + Math.max(0.22, Number(ap.radius) || 0.22);
-      if (adist > aminDist + 0.3) continue;
-      const dirX = adist > 1e-3 ? adx / adist : (Math.sign(apVel.x) || 1);
-      const dirZ = adist > 1e-3 ? adz / adist : (Math.sign(apVel.z) || 0);
-      const penetration = aminDist - adist;
-      const response = Number(a.bumpResponse) || 0.9;
-      const impulse = Math.min(2.2, (Math.max(0, penetration) * 2.4 + av * 0.28) * response);
       vel.x += dirX * impulse;
       vel.z += dirZ * impulse;
     }
@@ -12089,32 +11814,6 @@ function updateBumpableAssets(dt, playerPos, agentPushers = []) {
   }
 }
 
-function collectAgentBumpPushers(dt) {
-  const pushers = [];
-  const alive = new Set();
-  const invDt = 1 / Math.max(dt, 1e-3);
-  for (const agent of aiAgents) {
-    const id = String(agent?.id || "");
-    const posRaw = agent?.body?.translation?.();
-    if (!id || !posRaw) continue;
-    alive.add(id);
-    const pos = new THREE.Vector3(posRaw.x, posRaw.y, posRaw.z);
-    const prev = _agentPosPrevForBump.get(id);
-    const vel = prev ? pos.clone().sub(prev).multiplyScalar(invDt) : new THREE.Vector3();
-    _agentPosPrevForBump.set(id, pos.clone());
-    pushers.push({
-      id,
-      pos,
-      vel,
-      radius: Math.max(0.2, Number(agent?.radius) || 0.2),
-    });
-  }
-  for (const id of _agentPosPrevForBump.keys()) {
-    if (!alive.has(id)) _agentPosPrevForBump.delete(id);
-  }
-  return pushers;
-}
-
 function updateRapier(dt) {
   // No physics world loaded → free-fly camera movement so user can still navigate
   if (!rapierWorld || !playerBody) {
@@ -12144,15 +11843,7 @@ function updateRapier(dt) {
   // updates the query pipeline internally, avoiding the RefCell double-borrow
   // that happens with manual `queryPipeline.update(colliders)`.
   rapierWorld.timestep = dt;
-  try {
-    rapierWorld.step();
-    _rapierStepFaultCount = 0;
-  } catch (e) {
-    _rapierStepFaultCount += 1;
-    console.warn(`[RAPIER] step() failed (${_rapierStepFaultCount})`, e);
-    // Prevent hard crash loop; skip this frame and try again next tick.
-    return;
-  }
+  rapierWorld.step();
 
   // Sync camera and avatar to the body position that step() just resolved
   const p = playerBody.translation();
@@ -12212,8 +11903,7 @@ function updateRapier(dt) {
         RAPIER.QueryFilterFlags.EXCLUDE_SENSORS
       );
       const m = characterController.computedMovement();
-      const mx = m.x, my = m.y, mz = m.z;
-      playerBody.setNextKinematicTranslation({ x: t.x + mx, y: t.y + my, z: t.z + mz });
+      playerBody.setNextKinematicTranslation({ x: t.x + m.x, y: t.y + m.y, z: t.z + m.z });
     } else {
       playerBody.setNextKinematicTranslation({ x: t.x + desired.x, y: t.y + desired.y, z: t.z + desired.z });
     }
@@ -12233,10 +11923,9 @@ function updateRapier(dt) {
         RAPIER.QueryFilterFlags.EXCLUDE_SENSORS
       );
       const m = characterController.computedMovement();
-      const mx = m.x, my = m.y, mz = m.z;
       const grounded = characterController.computedGrounded();
       if (grounded && walkVerticalVel < 0) walkVerticalVel = 0;
-      playerBody.setNextKinematicTranslation({ x: t.x + mx, y: t.y + my, z: t.z + mz });
+      playerBody.setNextKinematicTranslation({ x: t.x + m.x, y: t.y + m.y, z: t.z + m.z });
     } else {
       playerBody.setNextKinematicTranslation({ x: t.x + desired.x, y: t.y + desired.y, z: t.z + desired.z });
     }
@@ -12269,7 +11958,6 @@ function tick() {
 
   // Bumpable assets: only compute if any exist
   if (_hasBumpableAssets()) {
-    const agentPushers = aiAgents.length ? collectAgentBumpPushers(dt) : [];
     let bumpPlayerPos = null;
     if (playerBody) {
       const p = playerBody.translation();
@@ -12278,7 +11966,7 @@ function tick() {
       bumpPlayerPos = controls.object.position.clone();
       bumpPlayerPos.y -= PLAYER_EYE_HEIGHT;
     }
-    updateBumpableAssets(dt, bumpPlayerPos, agentPushers);
+    updateBumpableAssets(dt, bumpPlayerPos);
   }
 
   // Update AI agents (if Rapier is initialized).
@@ -12318,18 +12006,40 @@ function tick() {
     }
   }
 
-  // LiDAR / sensor overlays — only when explicitly enabled
-  if (simSensorViewMode === "lidar" || simCompareView) {
+  // LiDAR / sensor overlays — run when explicitly enabled OR in dimos mode
+  if (simSensorViewMode === "lidar" || simCompareView || dimosMode) {
     lidarVizGroup.visible = true;
     updateLidarPointCloud();
     if (_lidarGeom.drawRange.count <= 0 && _lidarLastNonZeroDrawCount > 0) {
       _lidarGeom.setDrawRange(0, _lidarLastNonZeroDrawCount);
+    }
+    // In dimos mode, hide LiDAR viz from the main scene render — it's only
+    // needed for data capture + the sidebar LiDAR panel renders it separately.
+    if (dimosMode && simSensorViewMode !== "lidar" && !simCompareView) {
+      lidarVizGroup.visible = false;
     }
   } else if (rgbdPcOverlayOnLidar && (simSensorViewMode === "lidar" || simCompareView)) {
     updateRgbdPcOverlayCloud(false);
   }
 
   pushLidarPoseSample();
+
+  // Dimos synchronized sensor capture — runs before render so PiP can reuse textures
+  if (dimosMode && window.__dimosBridge) {
+    const bridge = window.__dimosBridge;
+    if (bridge._connected) {
+      // Odom: fast (10 Hz) — lightweight, just pose data
+      if (bridge._dirty.odom) {
+        bridge._dirty.odom = false;
+        bridge._publishOdom();
+      }
+      // Sensors: slower (2 Hz) — heavy GPU readback + encoding
+      if (bridge._dirty.sensors) {
+        bridge._dirty.sensors = false;
+        bridge._publishSensors();
+      }
+    }
+  }
 
   // Agent vision captures
   if (hasPendingCapture()) {
@@ -13634,3 +13344,544 @@ if (isStagingEditor) {
 
 // DimSim is sim-only; editor asset-creation pipeline is disabled.
 vibeCreatorApi = null;
+
+// ── dimos integration mode boot ──────────────────────────────────────────────
+// When dimosMode is active, auto-load a scene and spawn an agent, then connect
+// the LCM bridge so sensor data flows and external /odom drives the agent.
+if (dimosMode) {
+  (async () => {
+    try {
+      // 1. Auto-load scene
+      const sceneName = dimosScene || "hotel-lobby";
+      console.log(`[dimos] Loading scene: ${sceneName}`);
+      const resp = await fetch(`/sims/${sceneName}.json`);
+      if (!resp.ok) throw new Error(`Scene fetch failed: HTTP ${resp.status}`);
+      const sceneJson = await resp.json();
+      await importLevelFromJSON(sceneJson);
+      console.log(`[dimos] Scene loaded: ${sceneName}`);
+
+      // 2. Auto-spawn agent (wait for physics to settle)
+      await new Promise((r) => setTimeout(r, 1500));
+      await ensureRapierLoaded();
+      const agent = createAiAgent({ ephemeral: false });
+      aiAgents.push(agent);
+      // Place agent at a default spawn point
+      const spawnPos = sceneJson.dimosSpawnPoint || { x: 0, y: 0.5, z: 0 };
+      agent.setPosition(spawnPos.x, spawnPos.y, spawnPos.z);
+      // Override the agent's update loop — in dimos mode, movement is driven
+      // by /cmd_vel (Twist velocity commands) from the dimos navigation stack.
+      // Uses the character controller for collision-aware movement (no clipping through furniture).
+      agent.update = function(dt) {
+        const bridge = window.__dimosBridge;
+        if (bridge) {
+          const vel = bridge.getCmdVel();
+          if (vel.linX !== 0 || vel.linY !== 0 || vel.linZ !== 0 || vel.angY !== 0) {
+            const pos = this.body.translation();
+            const yaw = this.group.rotation.y;
+
+            // Integrate angular velocity (yaw rotation about Y axis)
+            const newYaw = yaw + vel.angY * dt;
+            this.group.rotation.y = newYaw;
+
+            // Compute desired displacement in world frame
+            const cosY = Math.cos(newYaw);
+            const sinY = Math.sin(newYaw);
+            const desired = {
+              x: (vel.linZ * sinY + vel.linX * cosY) * dt,
+              y: vel.linY * dt - 9.81 * dt * dt * 0.5, // gravity keeps agent grounded
+              z: (vel.linZ * cosY - vel.linX * sinY) * dt,
+            };
+
+            // Use character controller for collision-aware movement
+            if (this.controller && this.collider) {
+              this.controller.computeColliderMovement(this.collider, desired, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS);
+              const m = this.controller.computedMovement();
+              this.body.setNextKinematicTranslation({ x: pos.x + m.x, y: pos.y + m.y, z: pos.z + m.z });
+            } else {
+              this.body.setNextKinematicTranslation({ x: pos.x + desired.x, y: pos.y + desired.y, z: pos.z + desired.z });
+            }
+          }
+        }
+        this._syncVisual();
+      };
+      console.log(`[dimos] Agent spawned: ${agent.id}`);
+
+      // 3. Set up fast offscreen RGB capture for dimos (no splat warm-up delay)
+      const _dimosCapW = 960, _dimosCapH = 432;
+      const _dimosCapTarget = new THREE.WebGLRenderTarget(_dimosCapW, _dimosCapH, {
+        minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat, depthBuffer: true, stencilBuffer: false,
+      });
+      const _dimosCapCam = new THREE.PerspectiveCamera(80, _dimosCapW / _dimosCapH, camera.near, camera.far);
+      const _dimosCapBuf = new Uint8Array(_dimosCapW * _dimosCapH * 4);
+      const _dimosCapCvs = document.createElement("canvas");
+      _dimosCapCvs.width = _dimosCapW;
+      _dimosCapCvs.height = _dimosCapH;
+      const _dimosCapCtx = _dimosCapCvs.getContext("2d");
+
+      function _dimosCaptureRgb() {
+        const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
+        const yaw = agent.group?.rotation?.y ?? 0;
+        const pitch = typeof agent.pitch === "number" ? agent.pitch : 0;
+        const cp = Math.cos(pitch), sp = Math.sin(pitch);
+        const eyeY = ay + PLAYER_EYE_HEIGHT * 0.9;
+        _dimosCapCam.position.set(ax, eyeY, az);
+        _dimosCapCam.lookAt(ax + Math.sin(yaw)*cp, eyeY + sp, az + Math.cos(yaw)*cp);
+        _dimosCapCam.updateProjectionMatrix();
+        _dimosCapCam.updateMatrixWorld(true);
+
+        const prev = renderer.getRenderTarget();
+        renderer.setRenderTarget(_dimosCapTarget);
+        renderer.render(scene, _dimosCapCam);
+        renderer.setRenderTarget(prev);
+
+        renderer.readRenderTargetPixels(_dimosCapTarget, 0, 0, _dimosCapW, _dimosCapH, _dimosCapBuf);
+        // Flip Y
+        const flipped = new Uint8ClampedArray(_dimosCapW * _dimosCapH * 4);
+        const rowB = _dimosCapW * 4;
+        for (let y = 0; y < _dimosCapH; y++) {
+          flipped.set(_dimosCapBuf.subarray((_dimosCapH-1-y)*rowB, (_dimosCapH-y)*rowB), y*rowB);
+        }
+        _dimosCapCtx.putImageData(new ImageData(flipped, _dimosCapW, _dimosCapH), 0, 0);
+        const dataUrl = _dimosCapCvs.toDataURL("image/jpeg", 0.75);
+        const idx = dataUrl.indexOf("base64,");
+        return idx !== -1 ? dataUrl.slice(idx + 7) : null;
+      }
+
+      // Offscreen depth capture from agent POV (no screen render, no flicker)
+      function _dimosCaptureDepth() {
+        // Position the capture camera at the agent's POV (same as RGB capture)
+        const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
+        const yaw = agent.group?.rotation?.y ?? 0;
+        const pitch = typeof agent.pitch === "number" ? agent.pitch : 0;
+        const cp = Math.cos(pitch), sp = Math.sin(pitch);
+        const eyeY = ay + PLAYER_EYE_HEIGHT * 0.9;
+        _dimosCapCam.position.set(ax, eyeY, az);
+        _dimosCapCam.lookAt(ax + Math.sin(yaw)*cp, eyeY + sp, az + Math.cos(yaw)*cp);
+        _dimosCapCam.updateProjectionMatrix();
+        _dimosCapCam.updateMatrixWorld(true);
+
+        // Render depth offscreen using the agent camera
+        renderRgbdMetricPassOffscreen(_dimosCapCam);
+
+        // Restore render target to screen
+        renderer.setRenderTarget(null);
+
+        // Read back metric depth as Float32Array
+        const depthData = readRgbdMetricDepthFrameMeters();
+        if (!depthData) return null;
+        return {
+          data: depthData,
+          width: rgbdMetricTarget.width,
+          height: rgbdMetricTarget.height,
+        };
+      }
+
+      // 4. Sidebar sensor panel setup (depth + LiDAR canvases)
+      const _dimosSidebarW = 320, _dimosSidebarH = 145;
+      const _dimosDepthCanvas = document.getElementById("agent-depth-canvas");
+      const _dimosLidarCanvas = document.getElementById("agent-lidar-canvas");
+      if (_dimosDepthCanvas) { _dimosDepthCanvas.width = _dimosSidebarW; _dimosDepthCanvas.height = _dimosSidebarH; }
+      if (_dimosLidarCanvas) { _dimosLidarCanvas.width = _dimosSidebarW; _dimosLidarCanvas.height = _dimosSidebarH; }
+      const _dimosDepthCtx = _dimosDepthCanvas?.getContext("2d");
+      const _dimosLidarCtx = _dimosLidarCanvas?.getContext("2d");
+
+      // Small offscreen render targets for sidebar panels
+      const _dimosSidebarDepthTarget = new THREE.WebGLRenderTarget(_dimosSidebarW, _dimosSidebarH, {
+        minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat, depthBuffer: true, stencilBuffer: false,
+      });
+      const _dimosSidebarLidarTarget = new THREE.WebGLRenderTarget(_dimosSidebarW, _dimosSidebarH, {
+        minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat, depthBuffer: true, stencilBuffer: false,
+      });
+      const _dimosSidebarReadBuf = new Uint8Array(_dimosSidebarW * _dimosSidebarH * 4);
+
+      // Helper: render a target, readback, flip Y, draw to 2D canvas
+      function _dimosBlitToCanvas(rt, ctx, w, h) {
+        renderer.readRenderTargetPixels(rt, 0, 0, w, h, _dimosSidebarReadBuf);
+        const flipped = new Uint8ClampedArray(w * h * 4);
+        const rowB = w * 4;
+        for (let y = 0; y < h; y++) {
+          flipped.set(_dimosSidebarReadBuf.subarray((h-1-y)*rowB, (h-y)*rowB), y*rowB);
+        }
+        ctx.putImageData(new ImageData(flipped, w, h), 0, 0);
+      }
+
+      /** Update the sidebar sensor panels (called after capture) */
+      function _dimosUpdateSidebarPanels(rgbBase64) {
+        if (window.__dimosHeadless) return;
+
+        // RGB — set img src
+        if (rgbBase64 && agentShotImgEl) {
+          agentShotImgEl.src = `data:image/jpeg;base64,${rgbBase64}`;
+        }
+
+        // Depth — render colormap to small target, blit to canvas
+        if (_dimosDepthCtx) {
+          const prev = renderer.getRenderTarget();
+          rgbdVizMaterial.uniforms.uGrayMode.value = rgbdVizMode === "gray" ? 1.0 : 0.0;
+          renderer.setRenderTarget(_dimosSidebarDepthTarget);
+          renderer.setClearColor(0x000000, 1);
+          renderer.clear(true, true, true);
+          renderer.render(rgbdVizScene, rgbdPostCamera);
+          _dimosBlitToCanvas(_dimosSidebarDepthTarget, _dimosDepthCtx, _dimosSidebarW, _dimosSidebarH);
+          renderer.setRenderTarget(prev);
+        }
+
+        // LiDAR — render lidar scene from agent POV to small target, blit to canvas
+        if (_dimosLidarCtx) {
+          const prev = renderer.getRenderTarget();
+          // Save/restore scene visibility for lidar-only render
+          const savedSplat = splatMesh ? splatMesh.visible : false;
+          const savedSpark = sparkRendererMesh ? sparkRendererMesh.visible : false;
+          const savedAssets = assetsGroup.visible;
+          const savedPrims = primitivesGroup.visible;
+          const savedLights = lightsGroup.visible;
+          const savedTags = tagsGroup.visible;
+          const savedLidar = lidarVizGroup.visible;
+          const savedOverlay = rgbdPcOverlayGroup.visible;
+          const savedBg = scene.background;
+
+          if (splatMesh) splatMesh.visible = false;
+          if (sparkRendererMesh) sparkRendererMesh.visible = false;
+          assetsGroup.visible = false;
+          primitivesGroup.visible = false;
+          lightsGroup.visible = false;
+          tagsGroup.visible = false;
+          lidarVizGroup.visible = true;
+          rgbdPcOverlayGroup.visible = false;
+          scene.background = RGBD_BG;
+
+          renderer.setRenderTarget(_dimosSidebarLidarTarget);
+          renderer.setClearColor(0x000000, 1);
+          renderer.clear(true, true, true);
+          renderer.render(scene, _dimosCapCam);
+
+          // Restore
+          if (splatMesh) splatMesh.visible = savedSplat;
+          if (sparkRendererMesh) sparkRendererMesh.visible = savedSpark;
+          assetsGroup.visible = savedAssets;
+          primitivesGroup.visible = savedPrims;
+          lightsGroup.visible = savedLights;
+          tagsGroup.visible = savedTags;
+          lidarVizGroup.visible = savedLidar;
+          rgbdPcOverlayGroup.visible = savedOverlay;
+          scene.background = savedBg;
+
+          _dimosBlitToCanvas(_dimosSidebarLidarTarget, _dimosLidarCtx, _dimosSidebarW, _dimosSidebarH);
+          renderer.setRenderTarget(prev);
+        }
+      }
+
+      // 5. Connect dimos bridge
+      let _lastRgbBase64 = null;
+      const { DimosBridge } = await import("./dimos/dimosBridge.ts");
+      const bridge = new DimosBridge({
+        agent,
+        sensorSources: {
+          captureRgb: () => {
+            const b64 = _dimosCaptureRgb();
+            _lastRgbBase64 = b64;
+            return Promise.resolve(b64);
+          },
+          captureDepth: () => _dimosCaptureDepth(),
+          captureLidar: () => {
+            const frames = window.__robovalLidar.getLatestFrames();
+            const src = frames?.deskewed || frames?.raw;
+            if (!src) return null;
+            return { points: src.points, intensity: src.intensity, numPoints: src.points?.length / 3 || 0 };
+          },
+          getOdomPose: () => {
+            const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
+            const yaw = agent.group?.rotation?.y ?? 0;
+            // Convert yaw to quaternion (rotation about Y axis)
+            const qw = Math.cos(yaw / 2);
+            const qy = Math.sin(yaw / 2);
+            return { x: ax, y: ay, z: az, qx: 0, qy, qz: 0, qw };
+          },
+        },
+      });
+
+      // Hook: after _publishSensors, update sidebar panels
+      const origPublishSensors = bridge._publishSensors.bind(bridge);
+      bridge._publishSensors = function() {
+        origPublishSensors();
+        _dimosUpdateSidebarPanels(_lastRgbBase64);
+      };
+
+      bridge.connect();
+      window.__dimosBridge = bridge;
+      window.__dimosAgent = agent;
+
+      // 6. Connect eval harness (hooks bridge text messages for eval commands)
+      const _evalChannel = new URLSearchParams(window.location.search).get("channel") || undefined;
+      const { EvalHarness } = await import("./dimos/evalHarness.ts");
+      const evalHarness = new EvalHarness({
+        bridge,
+        importLevel: importLevelFromJSON,
+        channel: _evalChannel,
+        captureRgb: () => Promise.resolve(_dimosCaptureRgb()),
+        getSceneState: () => ({
+          assets: assets.map(a => ({
+            title: a.title, id: a.id,
+            transform: a.transform?.position
+              ? { x: a.transform.position.x ?? 0, y: a.transform.position.y ?? 0, z: a.transform.position.z ?? 0 }
+              : undefined,
+          })),
+          primitives: primitives.map(p => ({
+            label: p.name, id: p.id,
+            x: p.transform?.position?.x ?? 0,
+            y: p.transform?.position?.y ?? 0,
+            z: p.transform?.position?.z ?? 0,
+          })),
+          tags: tags.map(t => ({
+            label: t.title, id: t.id,
+            position: t.position || { x: 0, y: 0, z: 0 },
+          })),
+        }),
+        getAgentPose: () => {
+          const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
+          const yaw = agent.group?.rotation?.y ?? 0;
+          const pitch = typeof agent.pitch === "number" ? agent.pitch : 0;
+          return { x: ax, y: ay, z: az, yaw, pitch };
+        },
+      });
+      window.__evalHarness = evalHarness;
+
+      // Auto-open Agent Vision panel in dimos mode
+      if (!window.__dimosHeadless) {
+        const visionDetails = document.getElementById("agent-vision-details");
+        if (visionDetails) visionDetails.setAttribute("open", "");
+      }
+
+      // 7. Debug + eval control panel
+      if (!window.__dimosHeadless) {
+        const dbg = document.createElement("div");
+        dbg.id = "dimos-debug";
+        dbg.style.cssText = "position:fixed;bottom:8px;left:8px;z-index:99999;background:rgba(0,0,0,0.88);color:#0f0;font:11px/1.4 monospace;padding:10px 14px;border-radius:8px;max-width:460px;max-height:400px;overflow-y:auto;pointer-events:auto;user-select:text;";
+        document.body.appendChild(dbg);
+
+        const _dbgState = {
+          bridgeConn: false,
+          evalWorkflow: null,
+          evalTimeLeft: 0,
+          evalStatus: "idle",
+          evalResult: null,
+          msgsSent: 0,
+          msgsRecv: 0,
+          lastCmd: "",
+          sensorFps: 0,
+          agentPos: { x: 0, y: 0, z: 0 },
+          _sensorCount: 0,
+          _sensorLastTs: Date.now(),
+          log: [],
+        };
+
+        function _dbgLog(msg) {
+          _dbgState.log.push({ ts: Date.now(), msg });
+          if (_dbgState.log.length > 30) _dbgState.log.shift();
+        }
+
+        // Hook eval harness stop to capture results
+        const _origStop = evalHarness._stopWorkflow.bind(evalHarness);
+        evalHarness._stopWorkflow = async function(reason) {
+          await _origStop(reason);
+          _dbgState.evalStatus = `done (${reason})`;
+        };
+
+        // Hook sendCommand to log and capture results
+        const _origSendCmd = bridge.sendCommand.bind(bridge);
+        bridge.sendCommand = function(cmd) {
+          _dbgState.msgsSent++;
+          _dbgState.lastCmd = `TX: ${cmd.type}`;
+          _dbgLog(`TX ${cmd.type}`);
+          if (cmd.type === "workflowComplete") {
+            _dbgState.evalResult = cmd;
+            const scores = cmd.rubricScores || {};
+            const pass = Object.values(scores).every(s => s.pass !== false);
+            _dbgState.evalStatus = pass ? "PASS" : "FAIL";
+            _dbgLog(`Result: ${pass ? "PASS" : "FAIL"} — ${JSON.stringify(scores)}`);
+          }
+          return _origSendCmd(cmd);
+        };
+
+        // Hook sensor publish for FPS counter
+        const _origPubSensors2 = bridge._publishSensors;
+        bridge._publishSensors = function() {
+          _dbgState._sensorCount++;
+          _origPubSensors2.call(bridge);
+        };
+
+        // Available workflows (loaded from evals/ manifest)
+        let _availableWorkflows = [];
+        async function _loadWorkflows() {
+          try {
+            const resp = await fetch("/sims/manifest.json");
+            if (!resp.ok) return;
+            const manifest = await resp.json();
+            // Also try loading the evals manifest
+          } catch {}
+          // Hardcode known workflows for now (these match evals/ directory)
+          _availableWorkflows = [
+            { name: "reach-vase", env: "hotel-lobby", file: "hotel-lobby/reach-vase.json" },
+          ];
+          // Try to load evals manifest dynamically
+          try {
+            const r = await fetch("/evals/manifest.json");
+            if (r.ok) {
+              const m = await r.json();
+              _availableWorkflows = [];
+              for (const env of m.environments || []) {
+                for (const wf of env.workflows || []) {
+                  _availableWorkflows.push({ name: wf, env: env.name, file: `${env.name}/${wf}.json` });
+                }
+              }
+            }
+          } catch {}
+        }
+        _loadWorkflows();
+
+        // Start eval from browser — no CLI needed
+        async function _startEval(workflowInfo) {
+          if (_dbgState.evalStatus === "running") {
+            _dbgLog("Eval already running!");
+            return;
+          }
+          _dbgState.evalResult = null;
+          _dbgState.evalStatus = "loading";
+          _dbgLog(`Starting eval: ${workflowInfo.name}`);
+
+          try {
+            // Fetch workflow JSON from evals/ directory via bridge server
+            // The bridge serves static files from dist/, but evals/ is outside dist.
+            // So we fetch from a known location or use inline definitions.
+            let workflow;
+            try {
+              const resp = await fetch(`/evals/${workflowInfo.file}`);
+              if (resp.ok) {
+                workflow = await resp.json();
+              }
+            } catch {}
+
+            if (!workflow) {
+              // Fallback: inline workflow definitions
+              const knownWorkflows = {
+                "reach-vase": {
+                  name: "reach-vase",
+                  environment: "hotel-lobby",
+                  task: "Navigate to the large purple vase in the hotel lobby.",
+                  startPose: { x: 0, y: 0.5, z: 3, yaw: 0 },
+                  timeoutSec: 180,
+                  successCriteria: {
+                    objectDistance: { object: "agent", target: "vase", thresholdM: 2.0 }
+                  }
+                },
+              };
+              workflow = knownWorkflows[workflowInfo.name];
+            }
+
+            if (!workflow) {
+              _dbgLog(`ERROR: Could not load workflow ${workflowInfo.name}`);
+              _dbgState.evalStatus = "error";
+              return;
+            }
+
+            _dbgState.evalWorkflow = workflow.name;
+            _dbgState.evalStatus = "running";
+            _dbgState.evalTimeLeft = workflow.timeoutSec || 120;
+
+            // Directly invoke the eval harness (no WebSocket round-trip needed)
+            await evalHarness._startWorkflow(workflow);
+            _dbgLog(`Workflow started: ${workflow.name} (${workflow.timeoutSec}s timeout)`);
+          } catch (err) {
+            _dbgLog(`ERROR starting eval: ${err.message}`);
+            _dbgState.evalStatus = "error";
+          }
+        }
+
+        function _stopEval() {
+          if (evalHarness._workflow) {
+            evalHarness._stopWorkflow("manual-stop");
+            _dbgLog("Eval stopped manually");
+          }
+        }
+
+        // Expose for console access
+        window.__dimosEval = { start: _startEval, stop: _stopEval, workflows: _availableWorkflows };
+
+        // Update loop
+        setInterval(() => {
+          const now = Date.now();
+          const dt = (now - _dbgState._sensorLastTs) / 1000;
+          if (dt >= 1) {
+            _dbgState.sensorFps = Math.round(_dbgState._sensorCount / dt);
+            _dbgState._sensorCount = 0;
+            _dbgState._sensorLastTs = now;
+          }
+
+          if (_dbgState.evalStatus === "running" && evalHarness._startTime) {
+            const wf = evalHarness._workflow;
+            const elapsed = (now - evalHarness._startTime) / 1000;
+            const timeout = wf?.timeoutSec || 120;
+            _dbgState.evalTimeLeft = Math.max(0, Math.round(timeout - elapsed));
+          }
+
+          const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
+          _dbgState.agentPos = { x: ax.toFixed(2), y: ay.toFixed(2), z: az.toFixed(2) };
+          _dbgState.bridgeConn = bridge.ws?.readyState === WebSocket.OPEN;
+
+          // Eval status line
+          let evalLine;
+          if (_dbgState.evalStatus === "running") {
+            evalLine = `<span style="color:#ff0">EVAL: ${_dbgState.evalWorkflow} [${_dbgState.evalTimeLeft}s]</span>`;
+          } else if (_dbgState.evalStatus === "PASS") {
+            const r = _dbgState.evalResult;
+            const dist = r?.rubricScores?.objectDistance?.distanceM;
+            evalLine = `<span style="color:#0f0;font-weight:bold">PASS</span> ${_dbgState.evalWorkflow}` +
+              (dist !== undefined ? ` <span style="color:#888">(${dist.toFixed(1)}m)</span>` : "");
+          } else if (_dbgState.evalStatus === "FAIL") {
+            const r = _dbgState.evalResult;
+            const dist = r?.rubricScores?.objectDistance?.distanceM;
+            evalLine = `<span style="color:#f55;font-weight:bold">FAIL</span> ${_dbgState.evalWorkflow}` +
+              (dist !== undefined ? ` <span style="color:#888">(${dist.toFixed(1)}m)</span>` : "");
+          } else if (_dbgState.evalStatus === "idle") {
+            evalLine = `<span style="color:#888">EVAL: idle</span>`;
+          } else {
+            evalLine = `<span style="color:#0ff">EVAL: ${_dbgState.evalStatus}</span>`;
+          }
+
+          // Workflow buttons
+          const wfBtns = _availableWorkflows.map((wf, i) =>
+            `<button onclick="window.__dimosEval.start(window.__dimosEval.workflows[${i}])" ` +
+            `style="background:#333;color:#0f0;border:1px solid #0f0;border-radius:3px;padding:2px 8px;cursor:pointer;font:10px monospace;margin:1px;"` +
+            `>${wf.name}</button>`
+          ).join(" ");
+
+          const stopBtn = _dbgState.evalStatus === "running"
+            ? ` <button onclick="window.__dimosEval.stop()" style="background:#333;color:#f55;border:1px solid #f55;border-radius:3px;padding:2px 8px;cursor:pointer;font:10px monospace;margin:1px;">Stop</button>`
+            : "";
+
+          // Log (last 8 entries)
+          const logHtml = _dbgState.log.slice(-8).map(l => {
+            const t = new Date(l.ts).toLocaleTimeString();
+            return `<div style="color:#888;font-size:9px;">[${t}] ${l.msg}</div>`;
+          }).join("");
+
+          dbg.innerHTML = `
+            <div style="color:#fff;font-weight:bold;margin-bottom:4px;">dimos debug</div>
+            <div>Bridge: ${_dbgState.bridgeConn ? '<span style="color:#0f0">connected</span>' : '<span style="color:#f00">disconnected</span>'} | Sensors: ${_dbgState.sensorFps} fps</div>
+            <div>Agent: (${_dbgState.agentPos.x}, ${_dbgState.agentPos.y}, ${_dbgState.agentPos.z})</div>
+            <div style="margin:4px 0;">${evalLine}</div>
+            <div style="margin:4px 0;">Run: ${wfBtns}${stopBtn}</div>
+            <div style="border-top:1px solid #333;margin-top:4px;padding-top:4px;">${logHtml}</div>
+          `;
+        }, 500);
+      }
+
+      console.log("[dimos] Bridge + eval harness connected. Sensor publishing active.");
+    } catch (err) {
+      console.error("[dimos] Initialization failed:", err);
+    }
+  })();
+}

@@ -1,54 +1,99 @@
 #!/usr/bin/env -S deno run --allow-all --unstable-net
 
 /**
- * DimSim CLI — eval runner, dev server, and dimos agent launcher.
+ * DimSim CLI — 3D simulation, eval runner, dev server, and scene manager.
  *
  * Usage:
- *   dimsim dev   [--scene <name>] [--port <n>]                Dev server + browser
- *   dimsim eval  [--headless] [--parallel N] [--render gpu]   Headless CI evals
- *   dimsim agent [--nav-only]                                 dimos Python agent
+ *   dimsim setup                                            Download core assets
+ *   dimsim scene install <name>                             Download a scene
+ *   dimsim scene list                                       List scenes
+ *   dimsim scene remove <name>                              Remove a scene
+ *   dimsim dev   [--scene <name>] [--port <n>]              Dev server + browser
+ *   dimsim eval  [--headless] [--parallel N] [--render gpu] Headless CI evals
+ *   dimsim agent [--nav-only]                               dimos Python agent
  */
 
 import { resolve, dirname, fromFileUrl } from "@std/path";
 import { startBridgeServer } from "./bridge/server.ts";
 import { launchHeadless, launchMultiPage, type RenderMode } from "./headless/launcher.ts";
 import { runEvals, runEvalsMultiPage, collectWorkflows, toJunitXml, type EvalResult } from "./eval/runner.ts";
+import { getDimsimHome, getDistDir, setup, sceneInstall, sceneList, sceneRemove } from "./setup.ts";
 
-const CLI_DIR = dirname(fromFileUrl(import.meta.url));
-const PROJECT_DIR = resolve(CLI_DIR, "..");
-const DIST_DIR = resolve(PROJECT_DIR, "dist");
-const EVALS_DIR = resolve(PROJECT_DIR, "evals");
-const DIMOS_VENV = resolve(PROJECT_DIR, "../dimos/.venv/bin/python");
-const AGENT_PY = resolve(CLI_DIR, "agent.py");
+// When installed from JSR, import.meta.url is https:// — local paths don't exist.
+const IS_REMOTE = !import.meta.url.startsWith("file:");
+
+const CLI_DIR = IS_REMOTE ? null : dirname(fromFileUrl(import.meta.url));
+const PROJECT_DIR = CLI_DIR ? resolve(CLI_DIR, "..") : null;
+const LOCAL_DIST_DIR = PROJECT_DIR ? resolve(PROJECT_DIR, "dist") : null;
+const EVALS_DIR = PROJECT_DIR ? resolve(PROJECT_DIR, "evals") : `${getDimsimHome()}/evals`;
+const DIMOS_VENV = PROJECT_DIR ? resolve(PROJECT_DIR, "../dimos/.venv/bin/python") : null;
+const AGENT_PY = CLI_DIR ? resolve(CLI_DIR, "agent.py") : null;
+
+/** Resolve distDir: use local dist/ if it exists (dev), else ~/.dimsim/dist/ (installed). */
+async function resolveDistDir(): Promise<string> {
+  // Check local dist/ (only in dev mode, running from source)
+  if (LOCAL_DIST_DIR) {
+    try {
+      await Deno.stat(`${LOCAL_DIST_DIR}/index.html`);
+      return LOCAL_DIST_DIR;
+    } catch { /* not found */ }
+  }
+
+  const installed = getDistDir();
+  try {
+    await Deno.stat(`${installed}/index.html`);
+    return installed;
+  } catch { /* not found */ }
+
+  console.error(`[dimsim] No dist/ found.`);
+  console.error(`[dimsim] Run 'dimsim setup' to download core assets.`);
+  if (!IS_REMOTE) {
+    console.error(`[dimsim] Or build locally with 'npm run build'.`);
+  }
+  Deno.exit(1);
+}
 
 function printUsage() {
   console.log(`
 DimSim CLI — 3D simulation + eval harness for dimos
 
 Commands:
-  dimsim dev   [options]      Dev server (open browser, optional eval)
-  dimsim eval  [options]      Run eval workflows (headless CI)
-  dimsim agent [options]      Launch dimos Python agent
+  dimsim setup                   Download core assets (~40MB)
+  dimsim scene install <name>    Download a scene
+  dimsim scene list              List available + installed scenes
+  dimsim scene remove <name>     Remove a local scene
+  dimsim dev   [options]         Dev server (open browser, optional eval)
+  dimsim eval  [options]         Run eval workflows (headless CI)
+  dimsim agent [options]         Launch dimos Python agent
+
+Setup:
+  --local <path>                 Use local archive instead of downloading
 
 Dev:
-  --scene <name>              Scene to load (default: hotel-lobby)
-  --port <n>                  Server port (default: 8090)
-  --eval <workflow>           Run eval after browser connects
-  --env <name>                Environment filter
+  --scene <name>                 Scene to load (default: hotel-lobby)
+  --port <n>                     Server port (default: 8090)
+  --headless                     Launch headless browser (no GUI)
+  --render gpu|cpu               Render mode for headless (default: gpu)
+  --eval <workflow>              Run eval after browser connects
+  --env <name>                   Environment filter
 
 Eval:
-  --headless                  Headless Chromium (required for CI)
-  --parallel <n>              N parallel browser pages (default: 1)
-  --render gpu|cpu            gpu = Metal/ANGLE, cpu = SwiftShader (default: cpu)
-  --env <name>                Filter to environment
-  --workflow <name>           Filter to workflow
-  --output json|junit         Output format (default: json)
-  --port <n>                  Bridge port (default: 8090)
-  --timeout <ms>              Engine init timeout (default: auto)
+  --headless                     Headless Chromium (required for CI)
+  --parallel <n>                 N parallel browser pages (default: 1)
+  --render gpu|cpu               gpu = Metal/ANGLE, cpu = SwiftShader (default: cpu)
+  --env <name>                   Filter to environment
+  --workflow <name>              Filter to workflow
+  --output json|junit            Output format (default: json)
+  --port <n>                     Bridge port (default: 8090)
+  --timeout <ms>                 Engine init timeout (default: auto)
 
 Agent:
-  --nav-only                  Nav stack only (no LLM agent)
-  --venv <path>               Python venv path (default: ../dimos/.venv/bin/python)
+  --nav-only                     Nav stack only (no LLM agent)
+  --venv <path>                  Python venv path (default: ../dimos/.venv/bin/python)
+
+Environment:
+  GITHUB_TOKEN                   Required for private repo downloads
+  DIMSIM_HOME                    Override data dir (default: ~/.dimsim)
 `);
 }
 
@@ -81,14 +126,65 @@ async function main() {
 
   const port = parseInt(opts.port as string) || 8090;
 
+  // ── Setup ───────────────────────────────────────────────────────────
+  if (subcommand === "setup") {
+    const local = opts.local;
+    if (local === true) {
+      console.error("[dimsim] --local requires a path: dimsim setup --local ./dimsim-core-v0.1.0.tar.gz");
+      Deno.exit(1);
+    }
+    await setup(local as string | undefined);
+    Deno.exit(0);
+  }
+
+  // ── Scene management ────────────────────────────────────────────────
+  if (subcommand === "scene") {
+    const action = Deno.args[1];
+    const name = Deno.args[2];
+    const sceneOpts = parseArgs(Deno.args.slice(2));
+
+    if (action === "install" && name) {
+      const local = sceneOpts.local;
+      if (local === true) {
+        console.error("[dimsim] --local requires a path: dimsim scene install apt --local ./scene-apt-v0.1.0.tar.gz");
+        Deno.exit(1);
+      }
+      await sceneInstall(name, local as string | undefined);
+    } else if (action === "list") {
+      await sceneList();
+    } else if (action === "remove" && name) {
+      await sceneRemove(name);
+    } else {
+      console.log("Usage:");
+      console.log("  dimsim scene install <name> [--local <path>]");
+      console.log("  dimsim scene list");
+      console.log("  dimsim scene remove <name>");
+    }
+    Deno.exit(0);
+  }
+
+  // ── Dev ─────────────────────────────────────────────────────────────
   if (subcommand === "dev") {
+    const distDir = await resolveDistDir();
     const scene = (opts.scene as string) || "hotel-lobby";
+    const headless = opts.headless === true;
+    const render = ((opts.render as string) === "cpu" ? "cpu" : "gpu") as RenderMode;
     const evalWorkflow = opts.eval as string | undefined;
-    console.log(`[dimsim] Dev mode — scene: ${scene}, port: ${port}`);
+    console.log(`[dimsim] Dev mode — scene: ${scene}, port: ${port}${headless ? " (headless)" : ""}`);
+    console.log(`[dimsim] Serving from: ${distDir}`);
 
-    startBridgeServer({ port, distDir: DIST_DIR, scene });
+    // LCM bridge is always active in dev mode (unlike eval --headless which disables it)
+    startBridgeServer({ port, distDir, scene });
 
-    console.log(`[dimsim] Open http://localhost:${port} in your browser`);
+    if (headless) {
+      console.log("[dimsim] Launching headless browser...");
+      const url = `http://localhost:${port}`;
+      await launchHeadless({ url, timeout: 30000, render });
+      await new Promise((r) => setTimeout(r, 3000));
+      console.log("[dimsim] Headless browser ready. LCM bridge active.");
+    } else {
+      console.log(`[dimsim] Open http://localhost:${port} in your browser`);
+    }
 
     if (evalWorkflow) {
       console.log(`[dimsim] Eval workflow: ${evalWorkflow}`);
@@ -119,9 +215,20 @@ async function main() {
     await new Promise(() => {});
   }
 
+  // ── Agent ───────────────────────────────────────────────────────────
   if (subcommand === "agent") {
-    const pythonBin = (opts.venv as string) || DIMOS_VENV;
+    if (IS_REMOTE && !opts.venv) {
+      console.error(`[dimsim] Agent mode requires a local dimos install.`);
+      console.error(`[dimsim] Pass --venv /path/to/python`);
+      Deno.exit(1);
+    }
+    const pythonBin = (opts.venv as string) || DIMOS_VENV!;
     const navOnly = opts["nav-only"] === true;
+
+    if (IS_REMOTE && !AGENT_PY) {
+      console.error(`[dimsim] Agent mode is only available when running from source.`);
+      Deno.exit(1);
+    }
 
     // Verify python exists
     try {
@@ -132,7 +239,7 @@ async function main() {
       Deno.exit(1);
     }
 
-    const cmd = [pythonBin, AGENT_PY];
+    const cmd = [pythonBin, AGENT_PY!];
     if (navOnly) cmd.push("--nav-only");
 
     console.log(`[dimsim] Starting dimos agent${navOnly ? " (nav-only)" : ""}...`);
@@ -150,7 +257,9 @@ async function main() {
     Deno.exit(status.code);
   }
 
+  // ── Eval ────────────────────────────────────────────────────────────
   if (subcommand === "eval") {
+    const distDir = await resolveDistDir();
     const headless = opts.headless === true;
     const scene = (opts.scene as string) || (opts.env as string) || "hotel-lobby";
     const parallel = Math.max(1, parseInt(opts.parallel as string) || 1);
@@ -161,9 +270,6 @@ async function main() {
     const manifestPath = resolve(EVALS_DIR, "manifest.json");
 
     if (headless && parallel > 1) {
-      // -- Multi-page parallel eval ----------------------------------------
-      // Single bridge server + single browser with N pages/tabs.
-      // Each page gets a channel ID; runner routes commands via channel field.
       const allWorkflows = collectWorkflows(
         manifestPath,
         opts.env as string,
@@ -178,16 +284,13 @@ async function main() {
       const numPages = Math.min(parallel, allWorkflows.length);
       console.log(`[dimsim] Multi-page eval — ${allWorkflows.length} workflows across ${numPages} page(s)`);
 
-      // One bridge server, eval-only mode (no LCM)
-      startBridgeServer({ port, distDir: DIST_DIR, scene, evalOnly: true });
+      startBridgeServer({ port, distDir, scene, evalOnly: true });
       await new Promise((r) => setTimeout(r, 500));
 
-      // One browser with N pages
       const url = `http://localhost:${port}`;
       const instance = await launchMultiPage({ url, numPages, timeout, render });
       await new Promise((r) => setTimeout(r, 2000));
 
-      // Run all workflows across pages
       const allResults = await runEvalsMultiPage({
         wsUrl: `ws://localhost:${port}`,
         manifestPath,
@@ -198,7 +301,6 @@ async function main() {
 
       await instance.close();
 
-      // Output aggregated results
       if (outputFormat === "junit") {
         console.log(toJunitXml(allResults));
       } else {
@@ -214,7 +316,7 @@ async function main() {
     // -- Single worker eval (sequential) -----------------------------------
     console.log(`[dimsim] Eval mode — headless: ${headless}, port: ${port}`);
 
-    startBridgeServer({ port, distDir: DIST_DIR, scene, evalOnly: headless });
+    startBridgeServer({ port, distDir, scene, evalOnly: headless });
     await new Promise((r) => setTimeout(r, 500));
 
     const url = `http://localhost:${port}`;

@@ -1,15 +1,29 @@
 {
-  "name": "@antim-labs/dimsim",
-  "version": "0.1.0",
-  "exports": "./mod.ts",
+  "name": "@antim/dimsim",
+  "version": "0.1.1",
+  "license": "MIT",
+  "exports": "./cli.ts",
+  "publish": {
+    "include": [
+      "cli.ts",
+      "mod.ts",
+      "bridge/",
+      "eval/",
+      "headless/",
+      "vendor/",
+      "setup.ts"
+    ],
+    "exclude": ["test/"]
+  },
   "tasks": {
     "start": "deno run --allow-net --allow-read --unstable-net bridge/server.ts",
     "eval": "deno run --allow-all cli.ts eval"
   },
   "imports": {
-    "@dimos/lcm": "jsr:@dimos/lcm",
-    "@dimos/msgs": "jsr:@dimos/msgs",
-    "@std/path": "jsr:@std/path",
-    "@std/http": "jsr:@std/http"
+    "@dimos/lcm": "./vendor/lcm/mod.ts",
+    "@dimos/msgs": "jsr:@dimos/msgs@^0.2",
+    "@std/path": "jsr:@std/path@^1",
+    "@std/http": "jsr:@std/http@^1",
+    "playwright": "npm:playwright@^1.58"
   }
 }
