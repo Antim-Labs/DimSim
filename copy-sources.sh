@@ -23,6 +23,7 @@ mkdir -p "$DIR/src/ai"
 mkdir -p "$DIR/src/ai/sim"
 cp "$SRC/src/ai/sim/vlmActions.js" "$DIR/src/ai/sim/vlmActions.js"
 cp "$SRC/src/ai/sim/vlmPrompt.js"  "$DIR/src/ai/sim/vlmPrompt.js"
+cp "$SRC/src/ai/modelConfig.js"    "$DIR/src/ai/modelConfig.js"
 cp "$SRC/src/ai/vlmClient.js"      "$DIR/src/ai/vlmClient.js"
 cp "$SRC/src/ai/visionCapture.js"  "$DIR/src/ai/visionCapture.js"
 

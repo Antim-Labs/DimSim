@@ -221,7 +221,18 @@ async function performCaptureWithDelay(captureParams) {
     const srcY = height - 1 - y;
     const srcOff = srcY * rowBytes;
     const dstOff = y * rowBytes;
-    flipped.set(raw.subarray(srcOff, srcOff + rowBytes), dstOff);
+    // Match on-screen output transform: convert linear RT pixels to sRGB.
+    for (let i = 0; i < rowBytes; i += 4) {
+      const r = raw[srcOff + i + 0] / 255;
+      const g = raw[srcOff + i + 1] / 255;
+      const b = raw[srcOff + i + 2] / 255;
+      const a = raw[srcOff + i + 3];
+      const toSrgb = (x) => (x <= 0.0031308 ? 12.92 * x : 1.055 * Math.pow(x, 1 / 2.4) - 0.055);
+      flipped[dstOff + i + 0] = Math.max(0, Math.min(255, Math.round(toSrgb(r) * 255)));
+      flipped[dstOff + i + 1] = Math.max(0, Math.min(255, Math.round(toSrgb(g) * 255)));
+      flipped[dstOff + i + 2] = Math.max(0, Math.min(255, Math.round(toSrgb(b) * 255)));
+      flipped[dstOff + i + 3] = a;
+    }
   }
   const cvs = document.createElement("canvas");
   cvs.width = width;

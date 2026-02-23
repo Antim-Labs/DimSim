@@ -1,3 +1,5 @@
+import { MODEL_CONFIG } from "../modelConfig.js";
+
 // Sim-only action surface for SimStudio/DimSim parity.
 // Keep this list free of editor/build actions.
 
@@ -96,12 +98,12 @@ export const ACTIONS = [
 ];
 
 export const DEFAULTS = {
-  model: "gemini-robotics-er-1.5-preview", 
-  decideEverySteps: 1,
+  model: MODEL_CONFIG.simMode,
+  decideEverySteps: 6,
   stepMeters: 0.4,
   maxToiMeters: 50,
 };
 // model: "gpt-4o",
-// model: "gpt-4.1-2025-04-14",          // OpenAI GPT-4.1
+// model: "gemini-3.1-pro-preview",
 // model: "gemini-3-flash-preview",      // Google Gemini Flash
-//  model: "gemini-3.1-pro-preview",
+// model: "gemini-robotics-er-1.5-preview",

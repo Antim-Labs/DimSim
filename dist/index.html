@@ -8,8 +8,8 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
-    <script type="module" crossorigin src="/assets/index-D2WVWSXH.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-BZ8uRwH0.css">
+    <script type="module" crossorigin src="/assets/index-tHtM--lO.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DwXyhHCm.css">
   </head>
   <body>
     <!-- Force sim mode before main.js loads -->
@@ -104,16 +104,11 @@
             </details>
           </div>
 
-          <!-- Agent sensor views (auto-opened in dimos mode) -->
-          <details class="agent-collapse" id="agent-vision-details">
+          <!-- Agent debug (collapsed by default) -->
+          <details class="agent-collapse">
             <summary>Agent Vision</summary>
             <div class="agent-vision">
-              <div class="agent-sensor-label">RGB</div>
               <img id="agent-shot-img" class="agent-shot-img" alt="Agent POV" />
-              <div class="agent-sensor-label">Depth</div>
-              <canvas id="agent-depth-canvas" class="agent-sensor-canvas"></canvas>
-              <div class="agent-sensor-label">LiDAR</div>
-              <canvas id="agent-lidar-canvas" class="agent-sensor-canvas"></canvas>
             </div>
             <div class="agent-collapse-content">
               <div class="section-label">Last Decision</div>
@@ -167,7 +162,6 @@
 
       <!-- Interaction Hint -->
       <div id="interaction-hint" aria-hidden="true"></div>
-
     </div>
     
     <img src="/logo.svg" alt="" class="watermark-logo" />

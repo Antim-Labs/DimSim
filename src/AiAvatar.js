@@ -71,7 +71,7 @@ export class AiAvatar {
     // Thought label (simple sprite)
     this._labelCanvas = document.createElement("canvas");
     this._labelCanvas.width = 512;
-    this._labelCanvas.height = 256;
+    this._labelCanvas.height = 512;
     this._labelCtx = this._labelCanvas.getContext("2d");
     this._labelTex = new THREE.CanvasTexture(this._labelCanvas);
     this._labelSprite = new THREE.Sprite(
@@ -88,6 +88,7 @@ export class AiAvatar {
     this._labelSprite.renderOrder = 5000; // after SparkRenderer (999)
     this.group.add(this._labelSprite);
     this._setThought("");
+    this._lastDecisionBubbleAt = 0;
 
     this._target = null; // THREE.Vector3
     this._state = "IDLE"; // IDLE | WALK | INSPECT
@@ -101,6 +102,7 @@ export class AiAvatar {
     this._planRemaining = 0;
     this._stepCounter = 0;
     this._nextDecisionAt = 0;
+    this._decisionJitterMs = (Math.random() * 350) | 0;
     this._vlmInFlight = null;
     this._pendingDecision = null;
 
@@ -129,6 +131,21 @@ export class AiAvatar {
       this.RAPIER.ColliderDesc.capsule(halfHeight, radius).setFriction(0.8),
       this.body
     );
+    // Fake robodog body volume: add a horizontal spine capsule to reduce rear clipping.
+    // Movement still uses the vertical capsule for stable character-controller behavior.
+    this._spineHalfLen = Math.max(radius * 1.2, 0.13);
+    this._spineRadius = Math.max(radius * 0.62, 0.07);
+    // Keep fake volume mostly behind body center so it doesn't "push from the air" in front.
+    this._spineOffsetBack = Math.max(radius * 2.2, this._spineHalfLen + this._spineRadius + 0.02);
+    this._spineOffsetY = Math.max(this.halfHeight * 0.35, 0.08);
+    this.spineCollider = this.rapierWorld.createCollider(
+      this.RAPIER.ColliderDesc.capsule(this._spineHalfLen, this._spineRadius)
+        .setFriction(0.8)
+        .setTranslation(0, this._spineOffsetY, -this._spineOffsetBack)
+        // Rotate local +Y capsule axis to +Z (dog spine direction at yaw=0).
+        .setRotation({ x: Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 }),
+      this.body
+    );
     this.controller = this.rapierWorld.createCharacterController(0.05);
     this.controller.enableAutostep(0.25, 0.15, true);
     this.controller.enableSnapToGround(0.5);
@@ -148,6 +165,7 @@ export class AiAvatar {
       this.scene.remove(this.group);
     } catch {}
     try {
+      if (this.spineCollider) this.rapierWorld.removeCollider(this.spineCollider, true);
       this.rapierWorld.removeCollider(this.collider, true);
       this.rapierWorld.removeRigidBody(this.body);
     } catch {}
@@ -189,7 +207,11 @@ export class AiAvatar {
       this._rememberTag(top);
       const topId = top.id || null;
       const title = top.title || "(untitled)";
-      this._setThought(`I see: ${title}`);
+      // Don't continuously overwrite model-output bubble while the VLM is active.
+      const taskActive = !!this.vlm?.getTask?.()?.active;
+      if (!this.vlm?.enabled && !taskActive && now - this._lastDecisionBubbleAt > 1200) {
+        this._setThought(`I see: ${title}`);
+      }
 
       // Only enter INSPECT when we newly encounter a tag OR the cooldown elapsed.
       // Without this, a large tag radius causes the agent to repeatedly re-enter INSPECT
@@ -296,9 +318,9 @@ export class AiAvatar {
     const desired = { x: vx * dt, y: -2.0 * dt, z: vz * dt }; // small down force to keep grounded
 
     // Query pipeline is updated by rapierWorld.step() in the main loop
-    this.controller.computeColliderMovement(this.collider, desired, this.RAPIER.QueryFilterFlags.EXCLUDE_SENSORS);
-    const m = this.controller.computedMovement();
-    this.body.setNextKinematicTranslation({ x: p.x + m.x, y: p.y + m.y, z: p.z + m.z });
+    const m = this._computeConservativeMovement(desired);
+    const mx = m.x, my = m.y, mz = m.z;
+    this.body.setNextKinematicTranslation({ x: p.x + mx, y: p.y + my, z: p.z + mz });
 
     // Face direction.
     const yaw = Math.atan2(vx, vz);
@@ -383,7 +405,7 @@ export class AiAvatar {
       });
 
     // Rate limit: even if we render at 60fps, don't spam.
-    this._nextDecisionAt = now + Math.max(500, decideEverySteps * 250);
+    this._nextDecisionAt = now + Math.max(500, decideEverySteps * 250) + this._decisionJitterMs;
   }
 
   async _requestVlmDecision(now, nearby) {
@@ -392,7 +414,7 @@ export class AiAvatar {
     
     const capture = this.vlm.captureBase64;
     const prompt = this.vlm.buildPrompt?.({ actions: this.vlm.actions }) ?? "";
-    const model = this.vlm.model;
+    const model = this.vlm.getModel?.() || this.vlm.model;
     const endpoint = this.vlm.endpoint;
 
     const imageBase64 = await capture(this);
@@ -562,6 +584,14 @@ export class AiAvatar {
     }
     const parsed = typeof raw === "string" ? safeParseJson(raw) : raw;
     if (!parsed || typeof parsed !== "object") throw new Error("Invalid VLM output.");
+    // Update speech bubble immediately on each model turn (before action application).
+    try {
+      const responseBubble = this._extractBubbleTextFromModelOutput(parsed, raw);
+      if (responseBubble) {
+        this._setThought(responseBubble);
+        this._lastDecisionBubbleAt = Date.now();
+      }
+    } catch {}
     try {
       this.vlm?.onResponse?.({ raw: typeof raw === "string" ? raw : JSON.stringify(raw), parsed });
     } catch {}
@@ -569,17 +599,33 @@ export class AiAvatar {
   }
 
   _applyVlmDecision(decision) {
-    // Extract reasoning/thinking for display
+    // Extract reasoning/thinking for logs and bubble display.
+    const paramsForBubble = decision?.params && typeof decision.params === "object" ? decision.params : {};
     const thinking = decision.thinking || decision.thought || decision.reasoning || "";
-    const observation = decision.observation || "";
+    const observation =
+      decision.observation ||
+      decision.obs ||
+      decision.perception ||
+      paramsForBubble.observation ||
+      "";
     const subgoal = decision.currentSubgoal || "";
     
     // Update current sub-goal tracking
     if (subgoal) this._currentSubgoal = subgoal;
     
-    // Display thought bubble
-    const displayText = thinking || observation || subgoal;
-    if (displayText) this._setThought(displayText.slice(0, 80));
+    // Display observation bubble (prioritize what the agent sees, not chain-of-thought).
+    // If observation is absent, show a concise action status so the bubble still updates each turn.
+    const actionPreview = String(decision?.action || "").trim();
+    const paramPreview = Object.entries(paramsForBubble)
+      .slice(0, 2)
+      .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+      .join(", ");
+    const fallbackStatus = actionPreview
+      ? `Action: ${actionPreview}${paramPreview ? ` (${paramPreview})` : ""}`
+      : subgoal || "";
+    const displayText = String(observation || fallbackStatus || "").trim();
+    this._setThought(displayText);
+    this._lastDecisionBubbleAt = Date.now();
     
     try {
       this.vlm?.onDecision?.(decision);
@@ -624,7 +670,8 @@ export class AiAvatar {
     // === THINK - pause to reason ===
     if (action === "THINK") {
       const thought = String(params.thought || thinking || "thinking...");
-      this._setThought(thought.slice(0, 80));
+      // THINK action still surfaces as a visible status, but never truncated.
+      this._setThought(thought);
       this._tracePush(Date.now(), "THINK", { thought });
       this._plan = { type: "WAIT" };
       this._planRemaining = 0.5;
@@ -992,9 +1039,9 @@ export class AiAvatar {
       const vx = (dx / (dist || 1)) * this.walkSpeed;
       const vz = (dz / (dist || 1)) * this.walkSpeed;
       const desired = { x: vx * dt, y: -2.0 * dt, z: vz * dt };
-      this.controller.computeColliderMovement(this.collider, desired, this.RAPIER.QueryFilterFlags.EXCLUDE_SENSORS);
-      const m = this.controller.computedMovement();
-      this.body.setNextKinematicTranslation({ x: p.x + m.x, y: p.y + m.y, z: p.z + m.z });
+      const m = this._computeConservativeMovement(desired);
+      const mx = m.x, my = m.y, mz = m.z;
+      this.body.setNextKinematicTranslation({ x: p.x + mx, y: p.y + my, z: p.z + mz });
       this.group.rotation.y = Math.atan2(vx, vz);
       return false;
     }
@@ -1017,9 +1064,9 @@ export class AiAvatar {
       const desired = verticalMove
         ? { x: 0, y: v.y * speed * dt, z: 0 }
         : { x: v.x * speed * dt, y: -2.0 * dt, z: v.z * speed * dt };
-      this.controller.computeColliderMovement(this.collider, desired, this.RAPIER.QueryFilterFlags.EXCLUDE_SENSORS);
-      const m = this.controller.computedMovement();
-      this.body.setNextKinematicTranslation({ x: p.x + m.x, y: p.y + m.y, z: p.z + m.z });
+      const m = this._computeConservativeMovement(desired);
+      const mx = m.x, my = m.y, mz = m.z;
+      this.body.setNextKinematicTranslation({ x: p.x + mx, y: p.y + my, z: p.z + mz });
 
       // decrement steps by fraction of stepMeters
       this._moveStepAcc += distThisFrame / Math.max(0.05, stepMeters);
@@ -1071,15 +1118,64 @@ export class AiAvatar {
     try {
       const p = this.body.translation();
       const desired = { x: 0, y: -15.0 * dt, z: 0 };
-      this.controller.computeColliderMovement(this.collider, desired, this.RAPIER.QueryFilterFlags.EXCLUDE_SENSORS);
-      const m = this.controller.computedMovement();
-      this.body.setNextKinematicTranslation({ x: p.x, y: p.y + m.y, z: p.z });
+      const m = this._computeConservativeMovement(desired);
+      const my = m.y;
+      this.body.setNextKinematicTranslation({ x: p.x, y: p.y + my, z: p.z });
     } catch {}
+  }
+
+  _computeConservativeMovement(desired) {
+    const flags = this.RAPIER.QueryFilterFlags.EXCLUDE_SENSORS;
+    this.controller.computeColliderMovement(this.collider, desired, flags);
+    const mm = this.controller.computedMovement();
+    const main = { x: mm.x, y: mm.y, z: mm.z };
+    if (!this.spineCollider) return main;
+
+    // Keep the rear fake body aligned before querying its allowed movement.
+    this._syncSpineCollider();
+    this.controller.computeColliderMovement(this.spineCollider, desired, flags);
+    const ms = this.controller.computedMovement();
+    const spine = { x: ms.x, y: ms.y, z: ms.z };
+
+    // Conservative merge: use whichever collider allows less displacement per axis.
+    const towardZero = (a, b) => (Math.abs(a) <= Math.abs(b) ? a : b);
+    return {
+      x: towardZero(main.x, spine.x),
+      y: towardZero(main.y, spine.y),
+      z: towardZero(main.z, spine.z),
+    };
   }
 
   _syncVisual() {
     const p = this.body.translation();
     this.group.position.set(p.x, p.y, p.z);
+    this._syncSpineCollider();
+  }
+
+  _syncSpineCollider() {
+    if (!this.spineCollider) return;
+    const p = this.body?.translation?.();
+    if (!p) return;
+    const yaw = this.group?.rotation?.y ?? 0;
+    // Keep horizontal capsule aligned with model yaw and shifted toward rear torso.
+    const xOff = -Math.sin(yaw) * this._spineOffsetBack;
+    const zOff = -Math.cos(yaw) * this._spineOffsetBack;
+    const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, yaw, 0, "YXZ"));
+    try {
+      // Prefer parent-relative APIs when available (stable for colliders attached to a rigid body).
+      if (typeof this.spineCollider.setTranslationWrtParent === "function") {
+        this.spineCollider.setTranslationWrtParent({ x: xOff, y: this._spineOffsetY, z: zOff });
+      } else {
+        this.spineCollider.setTranslation({ x: p.x + xOff, y: p.y + this._spineOffsetY, z: p.z + zOff });
+      }
+      if (typeof this.spineCollider.setRotationWrtParent === "function") {
+        this.spineCollider.setRotationWrtParent({ x: q.x, y: q.y, z: q.z, w: q.w });
+      } else {
+        this.spineCollider.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w });
+      }
+    } catch {
+      // ignore physics updates if collider is unavailable this frame
+    }
   }
 
   _loadGLB() {
@@ -1174,24 +1270,86 @@ export class AiAvatar {
   _setThought(text) {
     const ctx = this._labelCtx;
     if (!ctx) return;
-    ctx.clearRect(0, 0, this._labelCanvas.width, this._labelCanvas.height);
-    if (!text) {
+    if (this.vlm?.showSpeechBubbleInScene === false) {
+      ctx.clearRect(0, 0, this._labelCanvas.width, this._labelCanvas.height);
       this._labelTex.needsUpdate = true;
       this._labelSprite.visible = false;
       return;
     }
+    if (!text) {
+      ctx.clearRect(0, 0, this._labelCanvas.width, this._labelCanvas.height);
+      this._labelSprite.scale.set(2.0, 1.0, 1);
+      this._labelTex.needsUpdate = true;
+      this._labelSprite.visible = false;
+      return;
+    }
+
+    const bubbleX = 20;
+    const bubbleY = 20;
+    const bubbleW = 472;
+    const bubbleH = 472;
+    const padX = 24;
+    const padY = 20;
+    const maxTextH = bubbleH - padY * 2;
+
+    // Keep canvas size fixed to avoid stale visual remnants from resizing.
+    if (this._labelCanvas.width !== 512) this._labelCanvas.width = 512;
+    if (this._labelCanvas.height !== 512) this._labelCanvas.height = 512;
+
+    // Fit all text within fixed bubble by reducing font size as needed.
+    let fontSize = 30;
+    let lineHeight = 36;
+    let lines = [];
+    while (fontSize >= 12) {
+      ctx.font = `bold ${fontSize}px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto`;
+      lineHeight = Math.round(fontSize * 1.18);
+      lines = wrapTextLines(ctx, text, bubbleW - padX * 2);
+      const usedH = lines.length * lineHeight;
+      if (usedH <= maxTextH) break;
+      fontSize -= 2;
+    }
+
+    ctx.clearRect(0, 0, this._labelCanvas.width, this._labelCanvas.height);
     this._labelSprite.visible = true;
     // bubble
     ctx.fillStyle = "rgba(0,0,0,0.65)";
     ctx.strokeStyle = "rgba(255,255,255,0.25)";
-    roundRect(ctx, 20, 20, 472, 160, 18);
+    roundRect(ctx, bubbleX, bubbleY, bubbleW, bubbleH, 18);
     ctx.fill();
     ctx.stroke();
     ctx.fillStyle = "rgba(255,255,255,0.92)";
-    ctx.font = "bold 34px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto";
+    ctx.font = `bold ${fontSize}px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto`;
     ctx.textBaseline = "top";
-    wrapText(ctx, text, 44, 42, 440, 40);
+    const textX = bubbleX + padX;
+    let textY = bubbleY + padY;
+    for (const line of lines) {
+      ctx.fillText(line, textX, textY);
+      textY += lineHeight;
+    }
+    this._labelSprite.scale.set(2.0, 2.0, 1);
     this._labelTex.needsUpdate = true;
+  }
+
+  _extractBubbleTextFromModelOutput(parsed, raw) {
+    const p = parsed && typeof parsed === "object" ? parsed : {};
+    const obs =
+      p.observation ||
+      p.obs ||
+      p.perception ||
+      p.sceneObservation ||
+      p.visualObservation ||
+      p.params?.observation ||
+      "";
+    if (typeof obs === "string" && obs.trim()) return obs.trim();
+    const action = typeof p.action === "string" ? p.action.trim() : "";
+    if (action) return `Action: ${action}`;
+
+    const rawText = typeof raw === "string" ? raw : "";
+    if (rawText) {
+      const m = rawText.match(/"observation"\s*:\s*"([^"]+)"/i);
+      if (m?.[1]) return m[1];
+    }
+    return "";
   }
 
   _memoryKey() {
@@ -1274,23 +1432,37 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
-  const words = String(text).split(/\s+/g);
+function wrapTextLines(ctx, text, maxWidth) {
+  const words = String(text).replace(/\s+/g, " ").trim().split(" ");
+  const lines = [];
   let line = "";
-  let yy = y;
-  for (let n = 0; n < words.length; n++) {
-    const test = line ? `${line} ${words[n]}` : words[n];
-    const m = ctx.measureText(test);
-    if (m.width > maxWidth && line) {
-      ctx.fillText(line, x, yy);
-      line = words[n];
-      yy += lineHeight;
-      if (yy > y + 120) break;
+  for (const rawWord of words) {
+    const word = rawWord || "";
+    const test = line ? `${line} ${word}` : word;
+    if (ctx.measureText(test).width <= maxWidth || !line) {
+      // If single word is too long, hard-break it.
+      if (!line && ctx.measureText(word).width > maxWidth) {
+        let chunk = "";
+        for (const ch of word) {
+          const next = chunk + ch;
+          if (ctx.measureText(next).width > maxWidth && chunk) {
+            lines.push(chunk);
+            chunk = ch;
+          } else {
+            chunk = next;
+          }
+        }
+        line = chunk;
+      } else {
+        line = test;
+      }
     } else {
-      line = test;
+      lines.push(line);
+      line = word;
     }
   }
-  if (line && yy <= y + 120) ctx.fillText(line, x, yy);
+  if (line) lines.push(line);
+  return lines.length ? lines : [""];
 }
 
 
