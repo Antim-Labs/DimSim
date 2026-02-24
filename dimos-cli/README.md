@@ -7,7 +7,7 @@ Browser-based Three.js + Rapier simulator with LCM transport, sensor publishing 
 ## Install
 
 ```sh
-deno install -gAf jsr:@antim/dimsim
+deno install -gAf --unstable-net jsr:@antim/dimsim
 ```
 
 ## Setup
