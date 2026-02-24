@@ -1,7 +1,6 @@
 /**
- * DimSim Setup — Downloads core assets and scenes from GitHub Releases.
+ * DimSim Setup — Downloads core assets and scenes from S3.
  *
- * For private repos, set GITHUB_TOKEN env var for authenticated downloads.
  * Local data stored at ~/.dimsim/ (override with DIMSIM_HOME env var).
  *
  *   ~/.dimsim/
@@ -11,20 +10,8 @@
  *   └── evals/          (eval workflows)
  */
 
-const OWNER = "Antim-Labs";
-const REPO = "DimSim";
 const REGISTRY_URL =
-  `https://raw.githubusercontent.com/${OWNER}/${REPO}/main/scenes.json`;
-
-function getGithubToken(): string | undefined {
-  return Deno.env.get("GITHUB_TOKEN") || Deno.env.get("GH_TOKEN");
-}
-
-function authHeaders(): Record<string, string> {
-  const token = getGithubToken();
-  if (!token) return {};
-  return { Authorization: `token ${token}` };
-}
+  "https://dimsim-assets.s3.amazonaws.com/scenes.json";
 
 export function getDimsimHome(): string {
   return (
@@ -55,17 +42,7 @@ async function fetchRegistry(localPath?: string): Promise<Registry> {
   if (localPath) {
     return JSON.parse(await Deno.readTextFile(localPath));
   }
-  const resp = await fetch(REGISTRY_URL, { headers: authHeaders() });
-  if (resp.status === 404 || resp.status === 403) {
-    const token = getGithubToken();
-    if (!token) {
-      throw new Error(
-        `Failed to fetch registry (${resp.status}). ` +
-        `If repo is private, set GITHUB_TOKEN env var.`
-      );
-    }
-    throw new Error(`Failed to fetch registry: ${resp.status} (token may lack repo access)`);
-  }
+  const resp = await fetch(REGISTRY_URL);
   if (!resp.ok) throw new Error(`Failed to fetch registry: ${resp.status}`);
   return resp.json();
 }
@@ -74,19 +51,8 @@ async function fetchRegistry(localPath?: string): Promise<Registry> {
 
 async function download(url: string, dest: string): Promise<void> {
   console.log(`  Downloading ${url}`);
-  const headers: Record<string, string> = {
-    ...authHeaders(),
-    Accept: "application/octet-stream",
-  };
-  const resp = await fetch(url, { headers });
-  if (!resp.ok) {
-    if ((resp.status === 404 || resp.status === 403) && !getGithubToken()) {
-      throw new Error(
-        `Download failed (${resp.status}). If repo is private, set GITHUB_TOKEN env var.`
-      );
-    }
-    throw new Error(`Download failed: ${resp.status} ${url}`);
-  }
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`Download failed: ${resp.status} ${url}`);
 
   const total = parseInt(resp.headers.get("content-length") || "0");
   const reader = resp.body!.getReader();

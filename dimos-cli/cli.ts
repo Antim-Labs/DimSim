@@ -92,7 +92,6 @@ Agent:
   --venv <path>                  Python venv path (default: ../dimos/.venv/bin/python)
 
 Environment:
-  GITHUB_TOKEN                   Required for private repo downloads
   DIMSIM_HOME                    Override data dir (default: ~/.dimsim)
 `);
 }

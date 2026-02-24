@@ -44,6 +44,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Upload assets to S3
+      - name: Upload to S3
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          aws s3 cp "dimsim-core-v${VERSION}.tar.gz" "s3://dimsim-assets/${GITHUB_REF_NAME}/"
+          aws s3 cp "scene-apt-v${VERSION}.tar.gz" "s3://dimsim-assets/${GITHUB_REF_NAME}/"
+          aws s3 cp scenes.json s3://dimsim-assets/scenes.json
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
       # Publish CLI to JSR
       - name: Publish to JSR
         run: cd dimos-cli && deno publish --allow-dirty --token "$JSR_TOKEN"
