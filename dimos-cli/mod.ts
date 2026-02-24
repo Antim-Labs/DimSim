@@ -46,7 +46,41 @@
  * ```
  */
 
+/** Start the WebSocket bridge server that relays LCM packets between the browser and external agents. */
 export { startBridgeServer } from "./bridge/server.ts";
-export { launchHeadless, launchMultiPage } from "./headless/launcher.ts";
-export { runEvals, runEvalsMultiPage, collectWorkflows, toJunitXml } from "./eval/runner.ts";
-export { setup, sceneInstall, sceneList, sceneRemove, getDimsimHome, getDistDir } from "./setup.ts";
+
+/** Launch a single headless Chromium page pointed at the sim. */
+export { launchHeadless } from "./headless/launcher.ts";
+
+/** Launch multiple headless pages for parallel eval workflows. */
+export { launchMultiPage } from "./headless/launcher.ts";
+
+/** Run eval workflows sequentially against a connected browser. */
+export { runEvals } from "./eval/runner.ts";
+
+/** Run eval workflows distributed across multiple browser pages. */
+export { runEvalsMultiPage } from "./eval/runner.ts";
+
+/** Collect workflow definitions from the manifest, optionally filtered by env/workflow name. */
+export { collectWorkflows } from "./eval/runner.ts";
+
+/** Convert eval results to JUnit XML format for CI reporting. */
+export { toJunitXml } from "./eval/runner.ts";
+
+/** Download and extract core DimSim assets to ~/.dimsim/. */
+export { setup } from "./setup.ts";
+
+/** Download and install a scene by name from the registry. */
+export { sceneInstall } from "./setup.ts";
+
+/** List installed and available scenes. */
+export { sceneList } from "./setup.ts";
+
+/** Remove a locally installed scene. */
+export { sceneRemove } from "./setup.ts";
+
+/** Get the DimSim home directory path (~/.dimsim or DIMSIM_HOME). */
+export { getDimsimHome } from "./setup.ts";
+
+/** Get the path to the dist directory containing built frontend assets. */
+export { getDistDir } from "./setup.ts";
