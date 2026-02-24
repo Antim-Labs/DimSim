@@ -1,11 +1,11 @@
 {
   "name": "@antim/dimsim",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "3D simulation environment for the dimos robotics stack. Browser-based Three.js + Rapier sim with LCM transport, sensor publishing, and eval harness.",
   "license": "MIT",
   "exports": {
-    ".": "./mod.ts",
-    "./cli": "./cli.ts"
+    ".": "./cli.ts",
+    "./mod": "./mod.ts"
   },
   "publish": {
     "include": [
