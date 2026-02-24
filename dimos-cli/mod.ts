@@ -34,7 +34,7 @@
  * Run headless evals in CI:
  *
  * ```sh
- * dimsim eval --headless --env hotel-lobby --workflow reach-vase
+ * dimsim eval --headless --env apt --workflow reach-vase
  * ```
  *
  * ## Programmatic API
