@@ -1,8 +1,11 @@
 {
   "name": "@antim/dimsim",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "license": "MIT",
-  "exports": "./cli.ts",
+  "exports": {
+    ".": "./mod.ts",
+    "./cli": "./cli.ts"
+  },
   "publish": {
     "include": [
       "cli.ts",
