@@ -49,6 +49,7 @@ const _assetColliderHandles = new Map();
 const PLAYER_RADIUS = 0.12;
 const PLAYER_HALF_HEIGHT = 0.25;
 const PLAYER_EYE_HEIGHT = PLAYER_HALF_HEIGHT + PLAYER_RADIUS + 0.2; // camera above body origin
+const LIDAR_MOUNT_HEIGHT = 0.35; // Go2 lidar mount height above ground
 
 const canvas = document.getElementById("c");
 const fileInput = document.getElementById("file-input");
@@ -1351,12 +1352,13 @@ function renderRgbdView(enableAutoRange = true) {
   renderer.render(rgbdVizScene, rgbdPostCamera);
 }
 
-function renderRgbdMetricPassOffscreen() {
-  rgbdMetricMaterial.uniforms.uNear.value = camera.near;
-  rgbdMetricMaterial.uniforms.uFar.value = camera.far;
+function renderRgbdMetricPassOffscreen(overrideCamera) {
+  const cam = overrideCamera || camera;
+  rgbdMetricMaterial.uniforms.uNear.value = cam.near;
+  rgbdMetricMaterial.uniforms.uFar.value = cam.far;
   rgbdMetricMaterial.uniforms.uNoiseEnabled.value = rgbdNoiseEnabled ? 1.0 : 0.0;
   rgbdMetricMaterial.uniforms.uSpeckleEnabled.value = rgbdSpeckleEnabled ? 1.0 : 0.0;
-  if (!_rgbdNearFarAsserted) {
+  if (!_rgbdNearFarAsserted && !overrideCamera) {
     console.assert(
       Math.abs(rgbdMetricMaterial.uniforms.uNear.value - camera.near) < 1e-9 &&
       Math.abs(rgbdMetricMaterial.uniforms.uFar.value - camera.far) < 1e-9,
@@ -1389,7 +1391,7 @@ function renderRgbdMetricPassOffscreen() {
   renderer.setRenderTarget(rgbdDepthTarget);
   renderer.setClearColor(0x000000, RGBD_CLEAR_ALPHA);
   renderer.clear(true, true, true);
-  renderer.render(scene, camera);
+  renderer.render(scene, cam);
 
   renderer.setRenderTarget(rgbdMetricTarget);
   renderer.setClearColor(0x000000, RGBD_CLEAR_ALPHA);
@@ -1594,10 +1596,10 @@ const LIDAR_NUM_RINGS = 32;
 const LIDAR_NUM_AZ_BINS = 1024;
 const LIDAR_MAX_POINTS = LIDAR_NUM_RINGS * LIDAR_NUM_AZ_BINS;
 const LIDAR_MIN_RANGE_M = 0.2;
-const LIDAR_MAX_RANGE_M = 25;
+const LIDAR_MAX_RANGE_M = 3;
 const LIDAR_RANGE_IMAGE_W = 1024; // optional dense azimuth bins for range image export
-const LIDAR_V_MIN_RAD = THREE.MathUtils.degToRad(-16);
-const LIDAR_V_MAX_RAD = THREE.MathUtils.degToRad(16);
+const LIDAR_V_MIN_RAD = THREE.MathUtils.degToRad(-30);
+const LIDAR_V_MAX_RAD = THREE.MathUtils.degToRad(10);
 const LIDAR_ACCUM_FRAMES = 50;
 const LIDAR_STATS_INTERVAL_MS = 1500;
 const LIDAR_ACCUM_MIN_TRANSLATION_M = 0.08;
@@ -1631,11 +1633,14 @@ function pushLidarPoseSample(stampNs = nowNs()) {
   let pos, quat;
   const dimosAgent = dimosMode && window.__dimosAgent;
   if (dimosAgent) {
-    // In dimos mode, sample from the agent's body position + orientation
+    // In dimos mode, sample from the agent's body position + orientation.
+    // getPosition() returns capsule center (~0.37m above ground), so subtract
+    // capsule half-extent to get ground level, then add mount height.
     const [ax, ay, az] = dimosAgent.getPosition?.() || [0, 0, 0];
-    const eyeY = ay + PLAYER_EYE_HEIGHT * 0.9;
-    pos = new THREE.Vector3(ax, eyeY, az);
-    const yaw = dimosAgent.group?.rotation?.y ?? 0;
+    const groundY = ay - (PLAYER_HALF_HEIGHT + PLAYER_RADIUS);
+    const lidarY = groundY + LIDAR_MOUNT_HEIGHT;
+    pos = new THREE.Vector3(ax, lidarY, az);
+    const yaw = window.__dimosYaw ?? dimosAgent.group?.rotation?.y ?? 0;
     const agentQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
     quat = agentQuat.multiply(_lidarToCamQuat);
   } else {
@@ -1917,6 +1922,9 @@ function frameToNpzBlob(frame, rangeImage = null) {
 let _lidarLatestRawFrame = null;
 let _lidarLatestDeskewedFrame = null;
 let _lidarLatestRangeImage = null;
+let _lidarLatestWorldPts = null;
+let _lidarLatestLocalPts = null; // deskewed lidar-local FLU (x=fwd, y=left, z=up)
+let _lidarLatestWorldIntensity = null;
 let _lidarAutoExport = false;
 let _lidarFrameSeq = 0;
 
@@ -2212,6 +2220,20 @@ function updateLidarPointCloud() {
     return;
   }
 
+  // Build set of collider handles to exclude from lidar raycasts.
+  // Excludes player collider and ALL AI agent colliders (lidar origin is inside them).
+  // In dimos mode, also explicitly exclude the active dimos agent body/colliders.
+  const _lidarExcludeHandles = new Set();
+  const _lidarHostAgent = dimosMode ? window.__dimosAgent : null;
+  const _lidarExcludeRigidBodyHandle = _lidarHostAgent?.body?.handle;
+  if (playerCollider) _lidarExcludeHandles.add(playerCollider.handle);
+  if (_lidarHostAgent?.collider?.handle != null) _lidarExcludeHandles.add(_lidarHostAgent.collider.handle);
+  if (_lidarHostAgent?.spineCollider?.handle != null) _lidarExcludeHandles.add(_lidarHostAgent.spineCollider.handle);
+  for (const a of aiAgents) {
+    if (a?.collider) _lidarExcludeHandles.add(a.collider.handle);
+    if (a?.spineCollider) _lidarExcludeHandles.add(a.spineCollider.handle);
+  }
+
   // Spinning ring LiDAR (true XYZ in lidar frame), incremental over ~0.1s wall-clock.
   const H = LIDAR_NUM_AZ_BINS;
   const V = LIDAR_NUM_RINGS;
@@ -2279,16 +2301,27 @@ function updateLidarPointCloud() {
         { x: origin.x, y: origin.y, z: origin.z },
         { x: dirWorld.x, y: dirWorld.y, z: dirWorld.z }
       );
-      const hit = rapierWorld.queryPipeline.castRayAndGetNormal(
-        rapierWorld.bodies,
-        rapierWorld.colliders,
-        ray,
-        LIDAR_MAX_RANGE_M,
-        false,
-        RAPIER.QueryFilterFlags.EXCLUDE_SENSORS,
-        undefined,
-        playerCollider?.handle
-      );
+      let hit = null;
+      let singleExcludeHandle = undefined;
+      // Defensive retry: if a self-collider slips through, recast while excluding it.
+      // Keeps scans alive even if exclusion bookkeeping is briefly stale.
+      for (let castAttempt = 0; castAttempt < 4; castAttempt++) {
+        hit = rapierWorld.queryPipeline.castRayAndGetNormal(
+          rapierWorld.bodies,
+          rapierWorld.colliders,
+          ray,
+          LIDAR_MAX_RANGE_M,
+          false,
+          RAPIER.QueryFilterFlags.EXCLUDE_SENSORS,
+          undefined,
+          singleExcludeHandle,
+          _lidarExcludeRigidBodyHandle,
+          (h) => !_lidarExcludeHandles.has(h)
+        );
+        const hitHandle = hit?.colliderHandle;
+        if (!hit || hitHandle == null || !_lidarExcludeHandles.has(hitHandle)) break;
+        singleExcludeHandle = hitHandle;
+      }
       let toi = hit ? (hit.toi ?? hit.timeOfImpact ?? 0) : Infinity;
       const hitNormal = hit?.normal || null;
 
@@ -2441,6 +2474,11 @@ function updateLidarPointCloud() {
   _lidarLatestRawFrame = rawFrame;
   _lidarLatestDeskewedFrame = deskewedFrame;
   _lidarLatestRangeImage = rangeImage;
+  // Save world-frame points for dimos bridge (Three.js Y-up coords).
+  // The bridge's cyclic permutation correctly converts these to ROS Z-up.
+  _lidarLatestWorldPts = st.worldPts.slice(0, st.n * 3);
+  _lidarLatestLocalPts = st.deskPts.slice(0, st.n * 3);
+  _lidarLatestWorldIntensity = st.intensity.slice(0, st.n);
 
   // Default visualization: accumulated world-space point cloud (depth-tested).
   if (!lidarOrderedDebugView) {
@@ -12356,16 +12394,11 @@ function tick() {
 
   pushLidarPoseSample();
 
-  // Dimos synchronized sensor capture — runs before render so PiP can reuse textures
+  // Dimos sensor capture — GPU readback needs rAF, odom runs independently via setInterval
   if (dimosMode && window.__dimosBridge) {
     const bridge = window.__dimosBridge;
     if (bridge._connected) {
-      // Odom: fast (10 Hz) — lightweight, just pose data
-      if (bridge._dirty.odom) {
-        bridge._dirty.odom = false;
-        bridge._publishOdom();
-      }
-      // Sensors: slower (2 Hz) — heavy GPU readback + encoding
+      // Sensors only: GPU readback (RGB, depth, lidar) needs active render
       if (bridge._dirty.sensors) {
         bridge._dirty.sensors = false;
         bridge._publishSensors();
@@ -13697,40 +13730,50 @@ if (dimosMode) {
       const agent = createAiAgent({ ephemeral: false });
       aiAgents.push(agent);
       // Place agent at a default spawn point
-      const spawnPos = sceneJson.dimosSpawnPoint || { x: 0, y: 0.5, z: 0 };
+      const spawnPos = sceneJson.dimosSpawnPoint || { x: 2, y: 0.5, z: 3 };
       agent.setPosition(spawnPos.x, spawnPos.y, spawnPos.z);
+      // Track yaw independently — reading from group.rotation.y (Three.js Euler)
+      // can return stale/zero values during internal matrix recomposition.
+      let _dimosYaw = 0;
       // Override the agent's update loop — in dimos mode, movement is driven
       // by /cmd_vel (Twist velocity commands) from the dimos navigation stack.
       // Uses the character controller for collision-aware movement (no clipping through furniture).
       agent.update = function(dt) {
         const bridge = window.__dimosBridge;
-        if (bridge) {
-          const vel = bridge.getCmdVel();
-          if (vel.linX !== 0 || vel.linY !== 0 || vel.linZ !== 0 || vel.angY !== 0) {
-            const pos = this.body.translation();
-            const yaw = this.group.rotation.y;
+        if (!bridge) { this._syncVisual(); return; }
+        const vel = bridge.getCmdVel();
+        if (vel.linX !== 0 || vel.linY !== 0 || vel.linZ !== 0 || vel.angY !== 0) {
+          const pos = this.body.translation();
 
-            // Integrate angular velocity (yaw rotation about Y axis)
-            const newYaw = yaw + vel.angY * dt;
-            this.group.rotation.y = newYaw;
+          // Integrate angular velocity (yaw rotation about Y axis)
+          _dimosYaw += vel.angY * dt;
+          this.group.rotation.y = _dimosYaw;
 
-            // Compute desired displacement in world frame
-            const cosY = Math.cos(newYaw);
-            const sinY = Math.sin(newYaw);
-            const desired = {
-              x: (vel.linZ * sinY + vel.linX * cosY) * dt,
-              y: vel.linY * dt - 9.81 * dt * dt * 0.5, // gravity keeps agent grounded
-              z: (vel.linZ * cosY - vel.linX * sinY) * dt,
-            };
+          // Compute desired displacement in world frame
+          const cosY = Math.cos(_dimosYaw);
+          const sinY = Math.sin(_dimosYaw);
+          const desired = {
+            x: (vel.linZ * sinY + vel.linX * cosY) * dt,
+            y: vel.linY * dt - 9.81 * dt * dt * 0.5, // gravity keeps agent grounded
+            z: (vel.linZ * cosY - vel.linX * sinY) * dt,
+          };
 
-            // Use character controller for collision-aware movement
-            if (this.controller && this.collider) {
-              this.controller.computeColliderMovement(this.collider, desired, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS);
-              const m = this.controller.computedMovement();
-              this.body.setNextKinematicTranslation({ x: pos.x + m.x, y: pos.y + m.y, z: pos.z + m.z });
-            } else {
-              this.body.setNextKinematicTranslation({ x: pos.x + desired.x, y: pos.y + desired.y, z: pos.z + desired.z });
-            }
+          // Use character controller for collision-aware movement
+          if (this.controller && this.collider) {
+            this.controller.computeColliderMovement(this.collider, desired, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS);
+            const m = this.controller.computedMovement();
+            this.body.setNextKinematicTranslation({ x: pos.x + m.x, y: pos.y + m.y, z: pos.z + m.z });
+          } else {
+            this.body.setNextKinematicTranslation({ x: pos.x + desired.x, y: pos.y + desired.y, z: pos.z + desired.z });
+          }
+        } else {
+          // Even with zero velocity, apply gravity to keep grounded
+          const pos = this.body.translation();
+          const desired = { x: 0, y: -9.81 * dt * dt * 0.5, z: 0 };
+          if (this.controller && this.collider) {
+            this.controller.computeColliderMovement(this.collider, desired, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS);
+            const m = this.controller.computedMovement();
+            this.body.setNextKinematicTranslation({ x: pos.x + m.x, y: pos.y + m.y, z: pos.z + m.z });
           }
         }
         this._syncVisual();
@@ -13779,9 +13822,8 @@ if (dimosMode) {
         return idx !== -1 ? dataUrl.slice(idx + 7) : null;
       }
 
-      // Offscreen depth capture from agent POV (no screen render, no flicker)
+      // Offscreen depth capture from agent POV (uses main RGBD pipeline targets)
       function _dimosCaptureDepth() {
-        // Position the capture camera at the agent's POV (same as RGB capture)
         const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
         const yaw = agent.group?.rotation?.y ?? 0;
         const pitch = typeof agent.pitch === "number" ? agent.pitch : 0;
@@ -13792,20 +13834,20 @@ if (dimosMode) {
         _dimosCapCam.updateProjectionMatrix();
         _dimosCapCam.updateMatrixWorld(true);
 
-        // Render depth offscreen using the agent camera
         renderRgbdMetricPassOffscreen(_dimosCapCam);
-
-        // Restore render target to screen
         renderer.setRenderTarget(null);
 
-        // Read back metric depth as Float32Array
         const depthData = readRgbdMetricDepthFrameMeters();
         if (!depthData) return null;
-        return {
-          data: depthData,
-          width: rgbdMetricTarget.width,
-          height: rgbdMetricTarget.height,
-        };
+
+        const dw = rgbdMetricTarget.width, dh = rgbdMetricTarget.height;
+
+        // Flip rows: WebGL reads bottom-to-top, image convention is top-to-bottom
+        const flipped = new Float32Array(dw * dh);
+        for (let y = 0; y < dh; y++) {
+          flipped.set(depthData.subarray((dh - 1 - y) * dw, (dh - y) * dw), y * dw);
+        }
+        return { data: flipped, width: dw, height: dh };
       }
 
       // 4. Sidebar sensor panel setup (depth + LiDAR canvases)
@@ -13918,67 +13960,57 @@ if (dimosMode) {
           },
           captureDepth: () => _dimosCaptureDepth(),
           captureLidar: () => {
-            const frames = window.__robovalLidar.getLatestFrames();
-            const src = frames?.deskewed || frames?.raw;
+            // Return world-frame points (Three.js Y-up).
+            // Bridge converts Y-up → ROS Z-up and labels frame_id="world".
+            const lLen = _lidarLatestWorldPts ? _lidarLatestWorldPts.length : -1;
+            if (lLen > 0) {
+              return {
+                points: _lidarLatestWorldPts,
+                intensity: _lidarLatestWorldIntensity,
+                numPoints: lLen / 3,
+              };
+            }
+            const frames = window.__robovalLidar?.getLatestFrames?.();
+            const src = frames?.raw;
             if (!src) return null;
             return { points: src.points, intensity: src.intensity, numPoints: src.points?.length / 3 || 0 };
           },
           getOdomPose: () => {
-            const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
-            const yaw = agent.group?.rotation?.y ?? 0;
-            // Convert yaw to quaternion (rotation about Y axis)
-            const qw = Math.cos(yaw / 2);
-            const qy = Math.sin(yaw / 2);
+            const pos = agent.getPosition?.();
+            if (!pos) return null; // skip this frame instead of fallback to origin
+            const [ax, ay, az] = pos;
+            const qw = Math.cos(_dimosYaw / 2);
+            const qy = Math.sin(_dimosYaw / 2);
             return { x: ax, y: ay, z: az, qx: 0, qy, qz: 0, qw };
           },
         },
       });
 
-      // Hook: after _publishSensors, update sidebar panels
+      // Hook: after _publishSensors, capture RGB locally for panels + publish lidar
       const origPublishSensors = bridge._publishSensors.bind(bridge);
       bridge._publishSensors = function() {
         origPublishSensors();
+        // Capture RGB for sidebar display only (not sent over WebSocket)
+        _lastRgbBase64 = _dimosCaptureRgb();
         _dimosUpdateSidebarPanels(_lastRgbBase64);
       };
 
       bridge.connect();
       window.__dimosBridge = bridge;
       window.__dimosAgent = agent;
+      // Expose yaw for lidar pose sampling (avoids reading Three.js Euler)
+      Object.defineProperty(window, '__dimosYaw', { get: () => _dimosYaw });
 
-      // 6. Connect eval harness (hooks bridge text messages for eval commands)
-      const _evalChannel = new URLSearchParams(window.location.search).get("channel") || undefined;
-      const { EvalHarness } = await import("./dimos/evalHarness.ts");
-      const evalHarness = new EvalHarness({
-        bridge,
-        importLevel: importLevelFromJSON,
-        channel: _evalChannel,
-        captureRgb: () => Promise.resolve(_dimosCaptureRgb()),
-        getSceneState: () => ({
-          assets: assets.map(a => ({
-            title: a.title, id: a.id,
-            transform: a.transform?.position
-              ? { x: a.transform.position.x ?? 0, y: a.transform.position.y ?? 0, z: a.transform.position.z ?? 0 }
-              : undefined,
-          })),
-          primitives: primitives.map(p => ({
-            label: p.name, id: p.id,
-            x: p.transform?.position?.x ?? 0,
-            y: p.transform?.position?.y ?? 0,
-            z: p.transform?.position?.z ?? 0,
-          })),
-          tags: tags.map(t => ({
-            label: t.title, id: t.id,
-            position: t.position || { x: 0, y: 0, z: 0 },
-          })),
-        }),
-        getAgentPose: () => {
-          const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
-          const yaw = agent.group?.rotation?.y ?? 0;
-          const pitch = typeof agent.pitch === "number" ? agent.pitch : 0;
-          return { x: ax, y: ay, z: az, yaw, pitch };
-        },
-      });
-      window.__evalHarness = evalHarness;
+      // Odom: publish on a standalone setInterval (not rAF) so it runs even when tab is backgrounded.
+      // rAF pauses when the tab loses focus, but odom must keep flowing for the planner.
+      setInterval(() => {
+        if (bridge._connected) {
+          bridge._publishOdom();
+        }
+      }, bridge.rates.odom);
+
+      // Eval harness disabled — focusing on dimos integration.
+      // Re-enable by importing evalHarness.ts when eval workflows are needed.
 
       // Auto-open Agent Vision panel in dimos mode
       if (!window.__dimosHeadless) {
@@ -13986,7 +14018,7 @@ if (dimosMode) {
         if (visionDetails) visionDetails.setAttribute("open", "");
       }
 
-      // 7. Debug + eval control panel
+      // 7. Debug panel (integration diagnostics)
       if (!window.__dimosHeadless) {
         const dbg = document.createElement("div");
         dbg.id = "dimos-debug";
@@ -13995,46 +14027,12 @@ if (dimosMode) {
 
         const _dbgState = {
           bridgeConn: false,
-          evalWorkflow: null,
-          evalTimeLeft: 0,
-          evalStatus: "idle",
-          evalResult: null,
-          msgsSent: 0,
-          msgsRecv: 0,
-          lastCmd: "",
           sensorFps: 0,
           agentPos: { x: 0, y: 0, z: 0 },
+          agentYaw: 0,
+          cmdVel: { angY: 0, linZ: 0 },
           _sensorCount: 0,
           _sensorLastTs: Date.now(),
-          log: [],
-        };
-
-        function _dbgLog(msg) {
-          _dbgState.log.push({ ts: Date.now(), msg });
-          if (_dbgState.log.length > 30) _dbgState.log.shift();
-        }
-
-        // Hook eval harness stop to capture results
-        const _origStop = evalHarness._stopWorkflow.bind(evalHarness);
-        evalHarness._stopWorkflow = async function(reason) {
-          await _origStop(reason);
-          _dbgState.evalStatus = `done (${reason})`;
-        };
-
-        // Hook sendCommand to log and capture results
-        const _origSendCmd = bridge.sendCommand.bind(bridge);
-        bridge.sendCommand = function(cmd) {
-          _dbgState.msgsSent++;
-          _dbgState.lastCmd = `TX: ${cmd.type}`;
-          _dbgLog(`TX ${cmd.type}`);
-          if (cmd.type === "workflowComplete") {
-            _dbgState.evalResult = cmd;
-            const scores = cmd.rubricScores || {};
-            const pass = Object.values(scores).every(s => s.pass !== false);
-            _dbgState.evalStatus = pass ? "PASS" : "FAIL";
-            _dbgLog(`Result: ${pass ? "PASS" : "FAIL"} — ${JSON.stringify(scores)}`);
-          }
-          return _origSendCmd(cmd);
         };
 
         // Hook sensor publish for FPS counter
@@ -14043,103 +14041,6 @@ if (dimosMode) {
           _dbgState._sensorCount++;
           _origPubSensors2.call(bridge);
         };
-
-        // Available workflows (loaded from evals/ manifest)
-        let _availableWorkflows = [];
-        async function _loadWorkflows() {
-          try {
-            const resp = await fetch("/sims/manifest.json");
-            if (!resp.ok) return;
-            const manifest = await resp.json();
-            // Also try loading the evals manifest
-          } catch {}
-          // Hardcode known workflows for now (these match evals/ directory)
-          _availableWorkflows = [
-            { name: "reach-vase", env: "hotel-lobby", file: "hotel-lobby/reach-vase.json" },
-          ];
-          // Try to load evals manifest dynamically
-          try {
-            const r = await fetch("/evals/manifest.json");
-            if (r.ok) {
-              const m = await r.json();
-              _availableWorkflows = [];
-              for (const env of m.environments || []) {
-                for (const wf of env.workflows || []) {
-                  _availableWorkflows.push({ name: wf, env: env.name, file: `${env.name}/${wf}.json` });
-                }
-              }
-            }
-          } catch {}
-        }
-        _loadWorkflows();
-
-        // Start eval from browser — no CLI needed
-        async function _startEval(workflowInfo) {
-          if (_dbgState.evalStatus === "running") {
-            _dbgLog("Eval already running!");
-            return;
-          }
-          _dbgState.evalResult = null;
-          _dbgState.evalStatus = "loading";
-          _dbgLog(`Starting eval: ${workflowInfo.name}`);
-
-          try {
-            // Fetch workflow JSON from evals/ directory via bridge server
-            // The bridge serves static files from dist/, but evals/ is outside dist.
-            // So we fetch from a known location or use inline definitions.
-            let workflow;
-            try {
-              const resp = await fetch(`/evals/${workflowInfo.file}`);
-              if (resp.ok) {
-                workflow = await resp.json();
-              }
-            } catch {}
-
-            if (!workflow) {
-              // Fallback: inline workflow definitions
-              const knownWorkflows = {
-                "reach-vase": {
-                  name: "reach-vase",
-                  environment: "hotel-lobby",
-                  task: "Navigate to the large purple vase in the hotel lobby.",
-                  startPose: { x: 0, y: 0.5, z: 3, yaw: 0 },
-                  timeoutSec: 180,
-                  successCriteria: {
-                    objectDistance: { object: "agent", target: "vase", thresholdM: 2.0 }
-                  }
-                },
-              };
-              workflow = knownWorkflows[workflowInfo.name];
-            }
-
-            if (!workflow) {
-              _dbgLog(`ERROR: Could not load workflow ${workflowInfo.name}`);
-              _dbgState.evalStatus = "error";
-              return;
-            }
-
-            _dbgState.evalWorkflow = workflow.name;
-            _dbgState.evalStatus = "running";
-            _dbgState.evalTimeLeft = workflow.timeoutSec || 120;
-
-            // Directly invoke the eval harness (no WebSocket round-trip needed)
-            await evalHarness._startWorkflow(workflow);
-            _dbgLog(`Workflow started: ${workflow.name} (${workflow.timeoutSec}s timeout)`);
-          } catch (err) {
-            _dbgLog(`ERROR starting eval: ${err.message}`);
-            _dbgState.evalStatus = "error";
-          }
-        }
-
-        function _stopEval() {
-          if (evalHarness._workflow) {
-            evalHarness._stopWorkflow("manual-stop");
-            _dbgLog("Eval stopped manually");
-          }
-        }
-
-        // Expose for console access
-        window.__dimosEval = { start: _startEval, stop: _stopEval, workflows: _availableWorkflows };
 
         // Update loop
         setInterval(() => {
@@ -14151,66 +14052,23 @@ if (dimosMode) {
             _dbgState._sensorLastTs = now;
           }
 
-          if (_dbgState.evalStatus === "running" && evalHarness._startTime) {
-            const wf = evalHarness._workflow;
-            const elapsed = (now - evalHarness._startTime) / 1000;
-            const timeout = wf?.timeoutSec || 120;
-            _dbgState.evalTimeLeft = Math.max(0, Math.round(timeout - elapsed));
-          }
-
           const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
           _dbgState.agentPos = { x: ax.toFixed(2), y: ay.toFixed(2), z: az.toFixed(2) };
+          _dbgState.agentYaw = (agent.group?.rotation?.y ?? 0).toFixed(3);
           _dbgState.bridgeConn = bridge.ws?.readyState === WebSocket.OPEN;
-
-          // Eval status line
-          let evalLine;
-          if (_dbgState.evalStatus === "running") {
-            evalLine = `<span style="color:#ff0">EVAL: ${_dbgState.evalWorkflow} [${_dbgState.evalTimeLeft}s]</span>`;
-          } else if (_dbgState.evalStatus === "PASS") {
-            const r = _dbgState.evalResult;
-            const dist = r?.rubricScores?.objectDistance?.distanceM;
-            evalLine = `<span style="color:#0f0;font-weight:bold">PASS</span> ${_dbgState.evalWorkflow}` +
-              (dist !== undefined ? ` <span style="color:#888">(${dist.toFixed(1)}m)</span>` : "");
-          } else if (_dbgState.evalStatus === "FAIL") {
-            const r = _dbgState.evalResult;
-            const dist = r?.rubricScores?.objectDistance?.distanceM;
-            evalLine = `<span style="color:#f55;font-weight:bold">FAIL</span> ${_dbgState.evalWorkflow}` +
-              (dist !== undefined ? ` <span style="color:#888">(${dist.toFixed(1)}m)</span>` : "");
-          } else if (_dbgState.evalStatus === "idle") {
-            evalLine = `<span style="color:#888">EVAL: idle</span>`;
-          } else {
-            evalLine = `<span style="color:#0ff">EVAL: ${_dbgState.evalStatus}</span>`;
-          }
-
-          // Workflow buttons
-          const wfBtns = _availableWorkflows.map((wf, i) =>
-            `<button onclick="window.__dimosEval.start(window.__dimosEval.workflows[${i}])" ` +
-            `style="background:#333;color:#0f0;border:1px solid #0f0;border-radius:3px;padding:2px 8px;cursor:pointer;font:10px monospace;margin:1px;"` +
-            `>${wf.name}</button>`
-          ).join(" ");
-
-          const stopBtn = _dbgState.evalStatus === "running"
-            ? ` <button onclick="window.__dimosEval.stop()" style="background:#333;color:#f55;border:1px solid #f55;border-radius:3px;padding:2px 8px;cursor:pointer;font:10px monospace;margin:1px;">Stop</button>`
-            : "";
-
-          // Log (last 8 entries)
-          const logHtml = _dbgState.log.slice(-8).map(l => {
-            const t = new Date(l.ts).toLocaleTimeString();
-            return `<div style="color:#888;font-size:9px;">[${t}] ${l.msg}</div>`;
-          }).join("");
+          const vel = bridge.getCmdVel();
+          _dbgState.cmdVel = { angY: vel.angY.toFixed(3), linZ: vel.linZ.toFixed(3) };
 
           dbg.innerHTML = `
-            <div style="color:#fff;font-weight:bold;margin-bottom:4px;">dimos debug</div>
+            <div style="color:#fff;font-weight:bold;margin-bottom:4px;">dimos integration</div>
             <div>Bridge: ${_dbgState.bridgeConn ? '<span style="color:#0f0">connected</span>' : '<span style="color:#f00">disconnected</span>'} | Sensors: ${_dbgState.sensorFps} fps</div>
-            <div>Agent: (${_dbgState.agentPos.x}, ${_dbgState.agentPos.y}, ${_dbgState.agentPos.z})</div>
-            <div style="margin:4px 0;">${evalLine}</div>
-            <div style="margin:4px 0;">Run: ${wfBtns}${stopBtn}</div>
-            <div style="border-top:1px solid #333;margin-top:4px;padding-top:4px;">${logHtml}</div>
+            <div>Agent: (${_dbgState.agentPos.x}, ${_dbgState.agentPos.y}, ${_dbgState.agentPos.z}) yaw=${_dbgState.agentYaw}</div>
+            <div>cmd_vel: angY=${_dbgState.cmdVel.angY} linZ=${_dbgState.cmdVel.linZ}</div>
           `;
         }, 500);
       }
 
-      console.log("[dimos] Bridge + eval harness connected. Sensor publishing active.");
+      console.log("[dimos] Bridge connected. Sensor publishing active.");
     } catch (err) {
       console.error("[dimos] Initialization failed:", err);
     }

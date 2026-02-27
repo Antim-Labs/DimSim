@@ -146,12 +146,19 @@ export class EvalHarness {
       if (typeof event.data === "string") {
         try {
           const cmd: EvalCommand = JSON.parse(event.data);
+          // Only handle messages with a recognized eval command type
+          if (!cmd.type) {
+            // Not an eval command (e.g. cmd_vel JSON) — forward to original handler
+            if (origOnMessage) (origOnMessage as (event: MessageEvent) => void).call(ws, event);
+            return;
+          }
           // Channel filtering: if this harness has a channel, only process
           // commands addressed to it (or commands with no channel for backwards compat)
           if (this.channel && cmd.channel && cmd.channel !== this.channel) return;
           this._handleCommand(cmd);
         } catch {
-          // Not valid JSON -- ignore
+          // Not valid JSON -- forward to original handler
+          if (origOnMessage) (origOnMessage as (event: MessageEvent) => void).call(ws, event);
         }
         return;
       }

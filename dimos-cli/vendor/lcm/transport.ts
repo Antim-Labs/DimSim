@@ -247,6 +247,11 @@ export class FragmentReassembler {
       this.pending.set(fragment.sequenceNumber, entry);
     }
 
+    if (fragment.fragmentOffset + fragment.data.length > entry.buffer.length) {
+      // Fragment doesn't fit — corrupted or mismatched packet, discard.
+      this.pending.delete(fragment.sequenceNumber);
+      return null;
+    }
     entry.buffer.set(fragment.data, fragment.fragmentOffset);
     entry.receivedFragments.add(fragment.fragmentNumber);
     entry.lastActivity = now;
