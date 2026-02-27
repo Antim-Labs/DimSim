@@ -1,4 +1,6 @@
 node_modules/
 *.tar.gz
-dist/sims/*.json
-!dist/sims/manifest.json
+dist/
+.DS_Store
+**/.DS_Store
+.deno/
