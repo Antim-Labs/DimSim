@@ -21,6 +21,7 @@ export class AiAvatar {
     senseRadius = 3.0,
     walkSpeed = 2.0,
     vlm = null,
+    headless = false,
   }) {
     this.id = id || `ai-${Math.random().toString(36).slice(2, 8)}`;
     this.scene = scene;
@@ -33,6 +34,7 @@ export class AiAvatar {
     this.senseRadius = senseRadius;
     this.walkSpeed = walkSpeed;
     this.vlm = vlm; // { enabled, endpoint, model, buildPrompt, actions, captureBase64, decideEverySteps, stepMeters }
+    this.headless = headless; // Skip visual rendering in headless mode, keep colliders
 
     // AI dimensions (match the smaller player so the agent fits in tight interiors too).
     this.radius = 0.12;
@@ -146,6 +148,7 @@ export class AiAvatar {
         .setRotation({ x: Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 }),
       this.body
     );
+    this.boxCollider = null; // Box collider created when GLB loads (matches model dimensions)
     this.controller = this.rapierWorld.createCharacterController(0.05);
     this.controller.enableAutostep(0.25, 0.15, true);
     this.controller.enableSnapToGround(0.5);
@@ -165,6 +168,7 @@ export class AiAvatar {
       this.scene.remove(this.group);
     } catch {}
     try {
+      if (this.boxCollider) this.rapierWorld.removeCollider(this.boxCollider, true);
       if (this.spineCollider) this.rapierWorld.removeCollider(this.spineCollider, true);
       this.rapierWorld.removeCollider(this.collider, true);
       this.rapierWorld.removeRigidBody(this.body);
@@ -1209,17 +1213,17 @@ export class AiAvatar {
         } catch {}
         
         this.model = gltf.scene;
-        
+
         // Auto-fit the model to our agent dimensions
         const bbox = new THREE.Box3().setFromObject(this.model);
         const size = bbox.getSize(new THREE.Vector3());
         const center = bbox.getCenter(new THREE.Vector3());
-        
+
         // Target height: roughly capsule height (halfHeight * 2 + radius * 2)
         const targetHeight = this.halfHeight * 2 + this.radius * 2;
         const scaleFactor = targetHeight / (size.y || 1);
         this.model.scale.setScalar(scaleFactor);
-        
+
         // Re-center: the group origin is at the physics body center,
         // which sits at (halfHeight + radius) above the ground.
         // We need to offset the model down so its feet touch the ground.
@@ -1235,10 +1239,46 @@ export class AiAvatar {
         const desiredFrontZ = this.radius * 1.1;
         const frontShift = desiredFrontZ - bbox.max.z;
         this.model.position.z += frontShift;
-        
+
         // The agent's forward convention is +Z (yaw=0 looks along +Z).
         // This robot model already faces +Z, so no rotation needed.
-        
+
+        // Create box collider matching the scaled and positioned model dimensions
+        bbox.setFromObject(this.model);
+        const finalSize = bbox.getSize(new THREE.Vector3());
+        const finalCenter = bbox.getCenter(new THREE.Vector3());
+
+        // Remove old box collider if it exists
+        if (this.boxCollider) {
+          this.rapierWorld.removeCollider(this.boxCollider, true);
+          this.boxCollider = null;
+        }
+
+        // Create box collider centered on the model's actual bounding box
+        const boxHalfExtents = {
+          x: finalSize.x / 2,
+          y: finalSize.y / 2,
+          z: finalSize.z / 2
+        };
+        this.boxCollider = this.rapierWorld.createCollider(
+          this.RAPIER.ColliderDesc.cuboid(boxHalfExtents.x, boxHalfExtents.y, boxHalfExtents.z)
+            .setFriction(0.8)
+            .setTranslation(finalCenter.x, finalCenter.y, finalCenter.z),
+          this.body
+        );
+
+        console.log(`[AI] Created box collider: ${finalSize.x.toFixed(2)}x${finalSize.y.toFixed(2)}x${finalSize.z.toFixed(2)} at offset (${finalCenter.x.toFixed(2)}, ${finalCenter.y.toFixed(2)}, ${finalCenter.z.toFixed(2)})`);
+
+        // Headless mode: skip visual rendering (save memory/GPU), keep collider
+        if (this.headless) {
+          console.log(`[AI] Headless mode: skipping visual model rendering`);
+          // Don't add model to scene, don't set up animations
+          // Model is loaded only to calculate box collider dimensions
+          this.model = null; // Release reference to free memory
+          return;
+        }
+
+        // Normal mode: add visual model
         // Real meshes receive shadows but don't cast (too expensive)
         this.model.traverse((m) => {
           if (m.isMesh) {
@@ -1262,7 +1302,7 @@ export class AiAvatar {
           if (idle) idle.play();
           else this.mixer.clipAction(gltf.animations[0]).play();
         }
-        
+
         console.log(`[AI] Loaded robot model: ${size.x.toFixed(2)}x${size.y.toFixed(2)}x${size.z.toFixed(2)}, scale=${scaleFactor.toFixed(3)}`);
     }
   }

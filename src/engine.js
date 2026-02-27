@@ -7764,6 +7764,8 @@ function createAiAgent({ ephemeral = false } = {}) {
     avatarUrl: appMode === "edit" ? "" : ["/agent-model/unitree_go2.glb", "/agent-model/robot.glb"],
     senseRadius: 3.0,
     walkSpeed: 2.0,
+    // Headless mode in dimos: skip visual rendering, keep colliders for physics
+    headless: dimosMode,
     vlm: {
       // In dimos mode, VLM is disabled — agent pose is driven externally via /odom.
       // Ephemeral workers auto-enable; manually spawned agents start idle.
