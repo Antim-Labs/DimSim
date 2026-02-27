@@ -33,7 +33,6 @@ let rapierWorld = null;
 let worldBody = null;
 let playerBody = null;
 let playerCollider = null;
-let worldTriMeshCollider = null;
 let flyMode = true;
 let ghostMode = false;
 let voxelGrid = null; // { NX, NY, NZ, voxel, min, occ }
@@ -68,9 +67,6 @@ const spawnAiBtn = document.getElementById("spawn-ai");
 const assetGlbInputEl = document.getElementById("asset-glb-input");
 const workspaceTabSceneBtn = document.getElementById("workspace-tab-scene");
 const workspaceTabAssetBuilderBtn = document.getElementById("workspace-tab-asset-builder");
-const collisionGlbInputEl = document.getElementById("collision-glb-input");
-const worldSelectEl = document.getElementById("world-select");
-const worldLoadBtn = document.getElementById("world-load");
 const editorSimLightPreviewBtn = document.getElementById("editor-sim-light-preview-btn");
 
 // Removed old collision quality/mode elements (simplified UI)
@@ -255,43 +251,6 @@ const olAssetsCountEl = document.getElementById("ol-assets-count");
 const olPrimsCountEl = document.getElementById("ol-prims-count");
 const olLightsCountEl = document.getElementById("ol-lights-count");
 
-// Portal elements
-const portalCreateBtn = document.getElementById("portal-create-btn");
-const portalModal = document.getElementById("portal-modal");
-const portalTitleEl = document.getElementById("portal-title");
-const portalDestinationEl = document.getElementById("portal-destination");
-const portalCreateConfirmBtn = document.getElementById("portal-create-confirm");
-const portalCancelBtn = document.getElementById("portal-cancel");
-const portalExitModal = document.getElementById("portal-exit-modal");
-const portalExitWorldNameEl = document.getElementById("portal-exit-world-name");
-const portalExitPlaceBtn = document.getElementById("portal-exit-place");
-const portalExitSkipBtn = document.getElementById("portal-exit-skip");
-
-// Portal loading screen elements
-const portalLoadingEl = document.getElementById("portal-loading");
-const portalLoadingTitleEl = document.getElementById("portal-loading-title");
-const portalLoadingDestEl = document.getElementById("portal-loading-dest");
-
-// Portal creation state
-let pendingPortalLink = null; // { entranceId, entranceWorldId, destinationWorldId, title }
-
-// Portal loading screen functions
-function showPortalLoading(destinationName, message = "Traveling through portal...") {
-  if (portalLoadingTitleEl) portalLoadingTitleEl.textContent = message;
-  if (portalLoadingDestEl) portalLoadingDestEl.textContent = destinationName;
-  if (portalLoadingEl) {
-    portalLoadingEl.classList.remove("hidden", "fade-out");
-  }
-}
-
-function hidePortalLoading() {
-  if (portalLoadingEl) {
-    portalLoadingEl.classList.add("fade-out");
-    setTimeout(() => {
-      portalLoadingEl.classList.add("hidden");
-    }, 500);
-  }
-}
 const assetInteractActionEl = document.getElementById("asset-interact-action");
 const assetInteractSelectedBtn = document.getElementById("asset-interact-selected");
 const assetEditStatesSelectedBtn = document.getElementById("asset-edit-states-selected");
@@ -719,37 +678,6 @@ const collisionSettings = {
 //   - A .ply file (splats)
 //   - A .glb file (collision)
 //   - A .json file (tags/assets)
-const WORLDS_MANIFEST = [
-  {
-    id: "empty-room",
-    name: "Empty Room",
-    folder: "/worlds/empty-room",
-    splatFile: "room.ply",
-    colliderFile: "room_collider.glb",
-    dataFile: "spark-world-tags-room_ply.json",
-  },
-  {
-    id: "garden",
-    name: "Garden",
-    folder: "/worlds/garden",
-    splatFile: "splats.ply",
-    colliderFile: "collider.glb",
-    dataFile: "spark-world-tags-splats_ply.json",
-  },
-];
-
-// Populate world selector dropdown
-function populateWorldSelector() {
-  if (!worldSelectEl) return;
-  worldSelectEl.innerHTML = '<option value="">— Select World —</option>';
-  for (const w of WORLDS_MANIFEST) {
-    const opt = document.createElement("option");
-    opt.value = w.id;
-    opt.textContent = w.name;
-    worldSelectEl.appendChild(opt);
-  }
-}
-populateWorldSelector();
 
 // Helper to normalize asset schema (backward compat)
 // This function ensures all asset properties are properly loaded including states, interactions, and actions
@@ -786,11 +714,6 @@ function normalizeAssetSchema(raw) {
     castShadow: raw.castShadow ?? false,
     receiveShadow: raw.receiveShadow ?? false,
     blobShadow: raw.blobShadow ?? null, // { opacity, scale, stretch, rotationDeg, offsetX, offsetY, offsetZ }
-    // Portal properties
-    isPortal: raw.isPortal ?? false,
-    destinationWorld: raw.destinationWorld ?? null,
-    linkedPortalId: raw.linkedPortalId ?? null,
-    linkedPortalPosition: raw.linkedPortalPosition ?? null,
   };
   
   // Copy actions if they exist in raw data
@@ -2764,44 +2687,23 @@ function saveTagsForWorld() {
       console.warn("[SAVE] Corrupted localStorage data, clearing...");
       byWorld = {};
     }
-    
-    const portalCount = assets.filter(a => a.isPortal).length;
-    console.log(`[SAVE] Saving ${assets.length} assets (${portalCount} portals) for world: ${worldKey}`);
-    
+
+    console.log(`[SAVE] Saving ${assets.length} assets for world: ${worldKey}`);
+
     // Only save lightweight metadata - NOT the full dataBase64 model data
-    // For regular assets: just save state changes (currentStateId, transform)
-    // For portals: save full portal data (they don't have dataBase64)
+    // Only save state changes (currentStateId, transform)
     const lightweightAssets = assets.map(a => {
-      if (a.isPortal) {
-        // Portals are small, save everything except runtime props
-        return {
-          id: a.id,
-          title: a.title,
-          notes: a.notes,
-          isPortal: true,
-          destinationWorld: a.destinationWorld,
-          linkedPortalId: a.linkedPortalId,
-          linkedPortalPosition: a.linkedPortalPosition,
-          currentStateId: a.currentStateId,
-          transform: a.transform,
-          pickable: false,
-          // Minimal state info for portals
-          states: a.states?.map(s => ({ id: s.id, name: s.name })) || [],
-          actions: a.actions || [],
-        };
-      } else {
-        // Regular assets: only save delta/metadata, not model data
-        return {
-          id: a.id,
-          currentStateId: a.currentStateId || a.currentState,
-          transform: a.transform,
-          pickable: a.pickable,
-          castShadow: a.castShadow ?? false,
-          receiveShadow: a.receiveShadow ?? false,
-          blobShadow: a.blobShadow || null,
-          _deltaOnly: true,
-        };
-      }
+      // Regular assets: only save delta/metadata, not model data
+      return {
+        id: a.id,
+        currentStateId: a.currentStateId || a.currentState,
+        transform: a.transform,
+        pickable: a.pickable,
+        castShadow: a.castShadow ?? false,
+        receiveShadow: a.receiveShadow ?? false,
+        blobShadow: a.blobShadow || null,
+        _deltaOnly: true,
+      };
     });
     
     // Save primitives — strip collider handles and large texture data URLs
@@ -2844,16 +2746,15 @@ function saveTagsForWorld() {
       console.warn("[SAVE] Quota exceeded, clearing old world data...");
       try {
         localStorage.removeItem("sparkWorldStateByWorld");
-        // Retry with just current world
+        // Retry with just current world and minimal data
         const freshData = {};
-        freshData[worldKey] = { tags, assets: assets.filter(a => a.isPortal).map(a => ({
-          id: a.id, title: a.title, notes: a.notes, isPortal: true,
-          destinationWorld: a.destinationWorld, linkedPortalId: a.linkedPortalId,
-          linkedPortalPosition: a.linkedPortalPosition, currentStateId: a.currentStateId,
-          transform: a.transform, states: [], actions: a.actions || [],
-        })), sceneSettings: serializeSceneSettings() };
+        freshData[worldKey] = {
+          tags,
+          assets: [],
+          sceneSettings: serializeSceneSettings()
+        };
         localStorage.setItem("sparkWorldStateByWorld", JSON.stringify(freshData));
-        console.log("[SAVE] Saved portals only after clearing old data");
+        console.log("[SAVE] Saved minimal data after clearing old data");
       } catch (e2) {
         console.error("[SAVE] Still failed after clearing:", e2);
       }
@@ -3723,7 +3624,7 @@ function renderAssetsList() {
     const sId = a.currentStateId || a.currentState || "A";
     const stateObj = Array.isArray(a.states) ? a.states.find((s) => s.id === sId) : a.states?.[sId];
     const label = a.title || stateObj?.glbName || "(asset)";
-    const kind = a.isPortal ? "portal" : (stateObj?.scene || stateObj?.shapeScene ? "shape" : "glb");
+    const kind = stateObj?.scene || stateObj?.shapeScene ? "shape" : "glb";
     el.innerHTML = `${escapeHtml(label)}<small>${kind}</small>`;
     el.addEventListener("click", () => selectAsset(a.id));
     assetsListEl.appendChild(el);
@@ -3900,12 +3801,6 @@ function disposeShapeStateRoot(root) {
 }
 
 async function instantiateAsset(a) {
-  // Handle portals specially
-  if (a?.isPortal) {
-    await instantiatePortalAsset(a);
-    return;
-  }
-  
   if (!a?.states) return;
   const sId = a.currentStateId || a.currentState || (Array.isArray(a.states) ? a.states[0]?.id : "A");
   const state = Array.isArray(a.states)
@@ -4009,85 +3904,13 @@ async function setAssetState(assetId, nextState) {
 async function applyAssetAction(assetId, actionId) {
   const a = assets.find((x) => x.id === assetId);
   if (!a) return false;
-  
-  // Handle portal interactions specially
-  if (a.isPortal && a.destinationWorld) {
-    console.log(`[PORTAL] Entering portal to: ${a.destinationWorld}`);
-    const destWorld = WORLDS_MANIFEST.find(w => w.id === a.destinationWorld);
-    const destName = destWorld?.name || a.destinationWorld;
-    
-    // Show loading screen
-    showPortalLoading(destName);
-    setStatus(`Traveling to ${destName}...`);
-    
-    // Store spawn position from linked portal (if exists)
-    const spawnPos = a.linkedPortalPosition || null;
-    
-    // Small delay for visual effect
-    await new Promise(resolve => setTimeout(resolve, 800));
-    
-    // Load the destination world with spawn position
-    await loadWorldViaPortal(a.destinationWorld, spawnPos, a.linkedPortalId);
-    
-    // Hide loading screen after a short delay
-    await new Promise(resolve => setTimeout(resolve, 300));
-    hidePortalLoading();
-    
-    return true;
-  }
-  
+
   const act = (a.actions || []).find((x) => x.id === actionId) || null;
   if (!act) return false;
   const cur = a.currentStateId || a.currentState || "A";
   if (cur !== act.from) return false;
   await setAssetState(assetId, act.to);
   return true;
-}
-
-// Special world loader for portal travel
-async function loadWorldViaPortal(worldId, spawnPosition, linkedPortalId) {
-  console.log(`[PORTAL] Loading world via portal: ${worldId}`, { spawnPosition, linkedPortalId });
-  
-  // Use the regular loadWorld function
-  await loadWorld(worldId);
-  
-  // Small delay to ensure physics world is ready
-  await new Promise(resolve => setTimeout(resolve, 200));
-  
-  // Try to find the destination portal in this world to get accurate spawn position
-  let finalSpawnPos = spawnPosition;
-  
-  if (linkedPortalId) {
-    const destPortal = assets.find(a => a.id === linkedPortalId);
-    if (destPortal?.transform?.position) {
-      finalSpawnPos = destPortal.transform.position;
-      console.log(`[PORTAL] Found destination portal, using its position:`, finalSpawnPos);
-    }
-  }
-  
-  // Teleport player to spawn position at ground level
-  if (finalSpawnPos) {
-    const spawnX = finalSpawnPos.x || 0;
-    const spawnZ = finalSpawnPos.z || 0;
-    
-    // Portal's y position is at its base/ground level
-    // Player body should be at ground + ~0.9m (half capsule height)
-    const groundY = finalSpawnPos.y || 0;
-    const playerBodyY = groundY + 0.9;
-    
-    console.log(`[PORTAL] Teleporting to: x=${spawnX.toFixed(2)}, bodyY=${playerBodyY.toFixed(2)}, z=${spawnZ.toFixed(2)}`);
-    
-    // Use the teleport function to set physics body
-    teleportPlayerTo(spawnX, playerBodyY, spawnZ);
-    
-    // Camera will be synced automatically in the next updateRapier tick
-    // But force sync now for immediate effect
-    if (controls?.object) {
-      const eyeY = playerBodyY + PLAYER_EYE_HEIGHT;
-      controls.object.position.set(spawnX, eyeY, spawnZ);
-      console.log(`[PORTAL] Camera set to: x=${spawnX.toFixed(2)}, y=${eyeY.toFixed(2)}, z=${spawnZ.toFixed(2)}`);
-    }
-  }
 }
 
 function getNearbyAssetsForAgent(agent, maxDist = 1.0) {
@@ -4215,8 +4038,6 @@ function getNearbyAssetsForAgent(agent, maxDist = 1.0) {
       currentStateName: stateName,
       actions: (a.actions || []).filter((x) => x.from === stateKey).map((x) => ({ id: x.id, label: x.label, from: x.from, to: x.to })),
       pickable: a.pickable || false,
-      isPortal: a.isPortal || false,
-      destinationWorld: a.destinationWorld || null,
       isHeld: holdStatus.held,
       heldBy: holdStatus.by || null,
     });
@@ -5008,7 +4829,7 @@ function getInteractableAssetAtCrosshair() {
       const g = groups.find((gr) => (gr.children || []).includes(primId) && gr.pickable);
       if (!g) continue;
       const canPickUp = !playerHeldAsset && !playerHeldGroupId && !isGroupHeld(g.id).held;
-      return { kind: "group", group: g, actions: [], dist: hit.distance, canPickUp, isPortal: false };
+      return { kind: "group", group: g, actions: [], dist: hit.distance, canPickUp };
     }
     return null;
   }
@@ -5020,9 +4841,8 @@ function getInteractableAssetAtCrosshair() {
   const actions = (asset.actions || []).filter((act) => act.from === currentState);
   const holdStatus = isAssetHeld(primary.id);
   const canPickUp = asset.pickable && !holdStatus.held && !playerHeldAsset && !playerHeldGroupId;
-  const isPortal = asset.isPortal && asset.destinationWorld;
 
-  if (actions.length === 0 && !canPickUp && !isPortal) return null;
+  if (actions.length === 0 && !canPickUp) return null;
 
   return {
     kind: "asset",
@@ -5030,7 +4850,6 @@ function getInteractableAssetAtCrosshair() {
     actions,
     dist: primary.dist,
     canPickUp,
-    isPortal,
     candidateIndex: _crosshairInteractCycleIndex,
     candidateCount: candidates.length,
   };
@@ -5179,20 +4998,13 @@ async function handlePlayerInteraction() {
     // No interactable asset at crosshair
     return;
   }
-  
-  const { kind, asset, group, actions, dist, canPickUp, isPortal } = target;
+
+  const { kind, asset, group, actions, dist, canPickUp } = target;
   if (kind === "group") {
     if (canPickUp) playerPickUpGroup(group.id);
     return;
   }
-  
-  // Handle portals immediately (no popup needed)
-  if (isPortal) {
-    console.log(`[PORTAL] Player entering portal: ${asset.title}`);
-    await applyAssetAction(asset.id, "enter_portal");
-    return;
-  }
-  
+
   // Build combined action list (regular actions + pick up if available)
   const combinedActions = [...actions];
   if (canPickUp) {
@@ -8746,360 +8558,8 @@ assetCancelBtn?.addEventListener("click", () => {
 });
 
 // =============================================================================
-// PORTAL CREATION
+// Portal system removed - no longer using /worlds/ directory
 // =============================================================================
-
-function showPortalModal(show = true) {
-  if (!portalModal) return;
-  portalModal.classList.toggle("hidden", !show);
-  portalModal.setAttribute("aria-hidden", String(!show));
-  
-  if (show) {
-    // Populate destination options (exclude current world)
-    if (portalDestinationEl) {
-      portalDestinationEl.innerHTML = '<option value="">— Select destination —</option>';
-      for (const w of WORLDS_MANIFEST) {
-        if (w.id !== worldKey) { // Don't show current world as destination
-          const opt = document.createElement("option");
-          opt.value = w.id;
-          opt.textContent = w.name;
-          portalDestinationEl.appendChild(opt);
-        }
-      }
-    }
-    if (portalTitleEl) portalTitleEl.value = "";
-  }
-}
-
-function createPortalGeometry() {
-  // Create a doorway frame shape
-  const frameGroup = new THREE.Group();
-  
-  // Portal frame material (glowing purple)
-  const frameMaterial = new THREE.MeshStandardMaterial({
-    color: 0x6366f1,
-    emissive: 0x6366f1,
-    emissiveIntensity: 0.5,
-    metalness: 0.8,
-    roughness: 0.2,
-  });
-  
-  // Portal surface material (semi-transparent, shimmering)
-  const portalMaterial = new THREE.MeshStandardMaterial({
-    color: 0x818cf8,
-    emissive: 0x4f46e5,
-    emissiveIntensity: 0.8,
-    transparent: true,
-    opacity: 0.6,
-    side: THREE.DoubleSide,
-  });
-  
-  // Frame dimensions
-  const width = 1.2;
-  const height = 2.2;
-  const depth = 0.1;
-  const frameThickness = 0.12;
-  
-  // Left pillar
-  const leftPillar = new THREE.Mesh(
-    new THREE.BoxGeometry(frameThickness, height, depth),
-    frameMaterial
-  );
-  leftPillar.position.set(-width / 2 + frameThickness / 2, height / 2, 0);
-  frameGroup.add(leftPillar);
-  
-  // Right pillar
-  const rightPillar = new THREE.Mesh(
-    new THREE.BoxGeometry(frameThickness, height, depth),
-    frameMaterial
-  );
-  rightPillar.position.set(width / 2 - frameThickness / 2, height / 2, 0);
-  frameGroup.add(rightPillar);
-  
-  // Top beam
-  const topBeam = new THREE.Mesh(
-    new THREE.BoxGeometry(width, frameThickness, depth),
-    frameMaterial
-  );
-  topBeam.position.set(0, height - frameThickness / 2, 0);
-  frameGroup.add(topBeam);
-  
-  // Portal surface (the "magical" part)
-  const portalSurface = new THREE.Mesh(
-    new THREE.PlaneGeometry(width - frameThickness * 2, height - frameThickness),
-    portalMaterial
-  );
-  portalSurface.position.set(0, (height - frameThickness) / 2 + frameThickness / 2, 0);
-  frameGroup.add(portalSurface);
-  
-  return frameGroup;
-}
-
-async function createPortal(title, destinationWorldId, linkedData = null) {
-  const id = randId();
-  const destWorld = WORLDS_MANIFEST.find(w => w.id === destinationWorldId);
-  if (!destWorld) {
-    setStatus("Invalid destination world");
-    return null;
-  }
-  
-  console.log(`[PORTAL] Creating portal: "${title}" → ${destWorld.name} (linkedData:`, linkedData, `)`);
-  
-  // Get placement position from crosshair raycast
-  const hit = rapierRaycastFromCamera(500);
-  const p = hit?.point || { x: controls.object.position.x, y: 0, z: controls.object.position.z - 2 };
-  console.log(`[PORTAL] Placement position:`, p);
-  
-  // Create portal asset data
-  const portalAsset = {
-    id,
-    title: title || `Portal to ${destWorld.name}`,
-    notes: `Leads to: ${destWorld.name}`,
-    isPortal: true,
-    destinationWorld: destinationWorldId,
-    linkedPortalId: linkedData?.linkedPortalId || null,
-    linkedPortalPosition: linkedData?.linkedPortalPosition || null,
-    states: [{
-      id: "active",
-      name: "Active",
-      glbName: "",
-      dataBase64: "", // We'll use procedural geometry
-      interactions: [{
-        id: "enter",
-        label: `Enter (go to ${destWorld.name})`,
-        to: "active", // Portal doesn't change state, just triggers world load
-      }],
-    }],
-    currentStateId: "active",
-    actions: [{
-      id: "enter_portal",
-      label: `Enter (go to ${destWorld.name})`,
-      from: "active",
-      to: "active",
-    }],
-    transform: {
-      position: { x: p.x, y: p.y, z: p.z },
-      rotation: { x: 0, y: 0, z: 0 },
-      scale: { x: 1, y: 1, z: 1 },
-    },
-    pickable: false,
-  };
-  
-  assets.push(portalAsset);
-  await instantiatePortalAsset(portalAsset);
-  saveTagsForWorld();
-  renderAssetsList();
-  selectAsset(id);
-  
-  setStatus(`Portal to "${destWorld.name}" created!`);
-  return portalAsset;
-}
-
-async function instantiatePortalAsset(portal) {
-  if (!portal?.isPortal) return;
-  
-  const portalGroup = createPortalGeometry();
-  portalGroup.name = `asset:${portal.id}`;
-  
-  // IMPORTANT: Set userData.assetId on all meshes for raycasting
-  portalGroup.traverse((child) => {
-    if (child.isMesh) {
-      child.userData.assetId = portal.id;
-    }
-  });
-  
-  // Apply transform
-  const t = portal.transform || {};
-  if (t.position) portalGroup.position.set(t.position.x || 0, t.position.y || 0, t.position.z || 0);
-  if (t.rotation) portalGroup.rotation.set(t.rotation.x || 0, t.rotation.y || 0, t.rotation.z || 0);
-  if (t.scale) portalGroup.scale.set(t.scale.x || 1, t.scale.y || 1, t.scale.z || 1);
-  
-  assetsGroup.add(portalGroup);
-  
-  // Build a simple box collider for the portal (since it's procedural geometry)
-  await buildPortalCollider(portal);
-}
-
-async function buildPortalCollider(portal) {
-  // Portals don't need physics colliders - they only need the mesh for raycasting
-  // The Three.js mesh is sufficient for player interaction detection
-  // Skip creating any Rapier collider to avoid blocking movement
-  
-  // Just ensure any old collider is removed
-  if (portal._colliderHandle != null) {
-    try {
-      await ensureRapierLoaded();
-      if (rapierWorld) {
-        const collider = rapierWorld.getCollider(portal._colliderHandle);
-        if (collider) rapierWorld.removeCollider(collider, true);
-      }
-    } catch {}
-    portal._colliderHandle = null;
-  }
-}
-
-// Portal button click handler
-portalCreateBtn?.addEventListener("click", () => {
-  if (appMode !== "edit") return;
-  showPortalModal(true);
-});
-
-portalCancelBtn?.addEventListener("click", () => {
-  showPortalModal(false);
-  pendingPortalLink = null;
-});
-
-portalCreateConfirmBtn?.addEventListener("click", async () => {
-  const destination = portalDestinationEl?.value;
-  const title = portalTitleEl?.value?.trim() || "";
-  
-  if (!destination) {
-    setStatus("Please select a destination world");
-    return;
-  }
-  
-  showPortalModal(false);
-  
-  // Step 1: Create the entrance portal in current world
-  const entrancePortal = await createPortal(title, destination);
-  if (!entrancePortal) return;
-  
-  // Store the pending link info
-  pendingPortalLink = {
-    entranceId: entrancePortal.id,
-    entranceWorldId: worldKey,
-    destinationWorldId: destination,
-    title: title,
-    entrancePosition: { ...entrancePortal.transform.position },
-  };
-  
-  // Load destination world to place exit
-  const destWorld = WORLDS_MANIFEST.find(w => w.id === destination);
-  const destName = destWorld?.name || destination;
-  
-  // Show loading screen
-  showPortalLoading(destName, "Setting up portal connection...");
-  setStatus(`Loading ${destName} to place exit portal...`);
-  
-  await new Promise(resolve => setTimeout(resolve, 800));
-  await loadWorld(destination);
-  
-  // Hide loading and show exit placement modal
-  await new Promise(resolve => setTimeout(resolve, 300));
-  hidePortalLoading();
-  showPortalExitModal(true, destName);
-});
-
-function showPortalExitModal(show = true, worldName = "") {
-  if (!portalExitModal) return;
-  portalExitModal.classList.toggle("hidden", !show);
-  portalExitModal.setAttribute("aria-hidden", String(!show));
-  
-  if (show && portalExitWorldNameEl) {
-    portalExitWorldNameEl.textContent = worldName;
-  }
-}
-
-portalExitPlaceBtn?.addEventListener("click", async () => {
-  if (!pendingPortalLink) {
-    showPortalExitModal(false);
-    return;
-  }
-  
-  showPortalExitModal(false);
-  await placeExitPortal();
-});
-
-portalExitSkipBtn?.addEventListener("click", async () => {
-  showPortalExitModal(false);
-  
-  if (pendingPortalLink) {
-    setStatus("Portal created without exit. You can add one later.");
-  }
-  pendingPortalLink = null;
-});
-
-async function placeExitPortal() {
-  if (!pendingPortalLink) return;
-  
-  const { entranceId, entranceWorldId, destinationWorldId, title, entrancePosition } = pendingPortalLink;
-  
-  // Get placement position from crosshair
-  const hit = rapierRaycastFromCamera(500);
-  const exitPos = hit?.point || { 
-    x: controls.object.position.x, 
-    y: 0, 
-    z: controls.object.position.z - 2 
-  };
-  
-  // Create the exit portal in the destination world (current world now)
-  // Pass linked data so it knows about the entrance portal
-  const sourceWorld = WORLDS_MANIFEST.find(w => w.id === entranceWorldId);
-  const exitPortal = await createPortal(
-    `Portal to ${sourceWorld?.name || entranceWorldId}`,
-    entranceWorldId,
-    {
-      linkedPortalId: entranceId,
-      linkedPortalPosition: entrancePosition
-    }
-  );
-  
-  if (exitPortal) {
-    // Now we need to update the entrance portal with the exit info
-    // Store this to update when we return to the entrance world
-    const exitInfo = {
-      exitId: exitPortal.id,
-      exitPosition: { ...exitPortal.transform.position },
-    };
-    
-    // Save to localStorage temporarily (will be applied when loading entrance world)
-    const linkKey = `portal_link_${entranceId}`;
-    localStorage.setItem(linkKey, JSON.stringify(exitInfo));
-    
-    console.log(`[PORTAL] Exit portal created: ${exitPortal.id}, linked to entrance: ${entranceId}`);
-    setStatus(`Exit portal created! You can now travel between worlds.`);
-  }
-  
-  pendingPortalLink = null;
-}
-
-// Handle 'P' key to place exit portal during setup
-document.addEventListener("keydown", (e) => {
-  if (e.key.toLowerCase() === "p" && pendingPortalLink && !portalExitModal?.classList.contains("hidden")) {
-    e.preventDefault();
-    placeExitPortal();
-    showPortalExitModal(false);
-  }
-});
-
-// Restore portal links from localStorage when world loads
-function restorePortalLinks() {
-  console.log(`[PORTAL] Checking for portal links to restore. Assets:`, assets.filter(a => a.isPortal).map(a => ({ id: a.id, title: a.title })));
-  
-  for (const asset of assets) {
-    if (!asset.isPortal) continue;
-    
-    const linkKey = `portal_link_${asset.id}`;
-    const linkData = localStorage.getItem(linkKey);
-    
-    console.log(`[PORTAL] Checking link for portal ${asset.id}: linkKey=${linkKey}, hasData=${!!linkData}`);
-    
-    if (linkData) {
-      try {
-        const { exitId, exitPosition } = JSON.parse(linkData);
-        asset.linkedPortalId = exitId;
-        asset.linkedPortalPosition = exitPosition;
-        console.log(`[PORTAL] ✓ Restored link for ${asset.id} → exit portal ${exitId} at`, exitPosition);
-        
-        // Clear the localStorage entry (one-time restore)
-        localStorage.removeItem(linkKey);
-        saveTagsForWorld();
-      } catch (e) {
-        console.warn("Failed to restore portal link:", e);
-      }
-    }
-  }
-}
 
 assetAddStateBtn?.addEventListener("click", () => {
   if (!pendingAssetUpload) return;
@@ -11164,12 +10624,7 @@ fileInput?.addEventListener("change", async (e) => {
     // Now that the mesh is initialized, framing should succeed immediately.
     frameToSplat(splatMesh);
 
-    setStatus(`Loaded ${file.name}. Waiting for collision .glb…`);
-    // Always use GLB TriMesh - wait for user to upload collision file
-    if (collisionGLBScene) {
-      await buildRapierTriMeshColliderFromGLB(collisionGLBScene);
-      setStatus(`Loaded ${file.name}. Physics ready.`);
-    }
+    setStatus(`Loaded ${file.name}.`);
   } catch (err) {
     console.error(err);
     setStatus(err?.message || "Failed to load splat.");
@@ -11179,305 +10634,7 @@ fileInput?.addEventListener("change", async (e) => {
 // =============================================================================
 // LOAD PRE-CONFIGURED WORLD
 // =============================================================================
-async function loadWorld(worldId) {
-  const world = WORLDS_MANIFEST.find((w) => w.id === worldId);
-  if (!world) {
-    setStatus(`World "${worldId}" not found.`);
-    return;
-  }
-
-  setStatus(`Loading ${world.name}…`);
-  setWorldKey(world.id);
-
-  try {
-    // 1. Load splat file
-    const splatUrl = `${world.folder}/${world.splatFile}`;
-    setStatus(`Loading splats…`);
-    const splatResp = await fetch(splatUrl);
-    if (!splatResp.ok) throw new Error(`Failed to fetch ${splatUrl}`);
-    const splatBlob = await splatResp.blob();
-    const splatFile = new File([splatBlob], world.splatFile, { type: "application/octet-stream" });
-    
-    const mesh = await createSplatMeshFromFile(splatFile);
-    disposeSplat(splatMesh);
-    splatMesh = mesh;
-    scene.add(splatMesh);
-    isLoadedSplat = true;
-    sparkNeedsUpdate = true;
-    frameToSplat(splatMesh);
-
-    // 2. Load collision GLB
-    const colliderUrl = `${world.folder}/${world.colliderFile}`;
-    setStatus(`Loading collision…`);
-    const colliderResp = await fetch(colliderUrl);
-    if (!colliderResp.ok) throw new Error(`Failed to fetch ${colliderUrl}`);
-    const colliderBlob = await colliderResp.blob();
-    
-    const colliderUrl2 = URL.createObjectURL(colliderBlob);
-    const gltf = await new Promise((resolve, reject) => {
-      gltfLoader.load(colliderUrl2, resolve, undefined, reject);
-    });
-    URL.revokeObjectURL(colliderUrl2);
-    
-    collisionGLBScene = gltf.scene;
-    await buildRapierTriMeshColliderFromGLB(collisionGLBScene);
-
-    // 3. Load tags/assets from JSON file, then merge localStorage modifications
-    setStatus(`Loading assets & tags…`);
-    
-    // Clear existing assets from scene first
-    for (const a of assets) {
-      const obj = assetsGroup.getObjectByName(`asset:${a.id}`);
-      if (obj) assetsGroup.remove(obj);
-      // Remove collider if exists
-      if (a._colliderHandle && rapierWorld) {
-        try {
-          // _colliderHandle can be either a collider object or a handle number
-          if (typeof a._colliderHandle === 'object' && a._colliderHandle.handle !== undefined) {
-            rapierWorld.removeCollider(a._colliderHandle, true);
-          } else if (typeof a._colliderHandle === 'number') {
-            const collider = rapierWorld.getCollider(a._colliderHandle);
-            if (collider) rapierWorld.removeCollider(collider, true);
-          }
-        } catch (e) {
-          console.warn(`[CLEANUP] Failed to remove collider for ${a.id}:`, e);
-        }
-      }
-    }
-    
-    // Also clear the _assetColliderHandles Map
-    _assetColliderHandles.forEach((handle, assetId) => {
-      try {
-        if (typeof handle === 'object' && handle.handle !== undefined) {
-          rapierWorld.removeCollider(handle, true);
-        } else if (typeof handle === 'number') {
-          const collider = rapierWorld.getCollider(handle);
-          if (collider) rapierWorld.removeCollider(collider, true);
-        }
-      } catch (e) {}
-    });
-    _assetColliderHandles.clear();
-    
-    // Clean up primitive colliders BEFORE clearing the array
-    for (const p of primitives) {
-      if (p._colliderHandle != null && rapierWorld) {
-        try {
-          if (typeof p._colliderHandle === 'object' && p._colliderHandle.handle !== undefined) {
-            rapierWorld.removeCollider(p._colliderHandle, true);
-          }
-        } catch (e) {
-          console.warn(`[CLEANUP] Failed to remove primitive collider for ${p.id}:`, e);
-        }
-        p._colliderHandle = null;
-      }
-    }
-    
-    assets = [];
-    tags = [];
-    primitives = [];
-    editorLights = [];
-    
-    // Clear existing primitives from scene (visuals only – colliders already removed above)
-    while (primitivesGroup.children.length) {
-      const c = primitivesGroup.children[0];
-      c.geometry?.dispose();
-      disposePrimitiveMaterial(c.material);
-      primitivesGroup.remove(c);
-    }
-    // Clear existing editor lights from scene
-    while (lightsGroup.children.length) {
-      const c = lightsGroup.children[0];
-      c.traverse?.((m) => { m.geometry?.dispose(); m.material?.dispose(); });
-      lightsGroup.remove(c);
-    }
-    
-    // Load localStorage modifications (deltas + portals)
-    let storedDeltas = {};  // Map of assetId -> delta data
-    let storedPortals = []; // Full portal assets
-    let storedTags = null;
-    let storedPrimitives = null;
-    let storedLights = null;
-    let storedGroups = null;
-    
-    try {
-      const rawState = localStorage.getItem("sparkWorldStateByWorld");
-      const byWorld = rawState ? JSON.parse(rawState) : {};
-      const storedState = byWorld[world.id];
-      
-      if (storedState && typeof storedState === "object") {
-        if (Array.isArray(storedState.tags)) {
-          storedTags = storedState.tags;
-        }
-        if (Array.isArray(storedState.primitives)) {
-          storedPrimitives = storedState.primitives;
-        }
-        if (Array.isArray(storedState.lights)) {
-          storedLights = storedState.lights;
-        }
-        if (Array.isArray(storedState.groups)) {
-          storedGroups = storedState.groups;
-        }
-        if (Array.isArray(storedState.assets)) {
-          for (const stored of storedState.assets) {
-            if (stored.isPortal) {
-              storedPortals.push(stored);
-            } else if (stored._deltaOnly) {
-              storedDeltas[stored.id] = stored;
-            }
-          }
-        }
-        console.log(`[WORLD] Found localStorage data: ${storedPortals.length} portals, ${Object.keys(storedDeltas).length} asset deltas`);
-      }
-    } catch (e) {
-      console.warn("Failed to load from localStorage:", e);
-    }
-    
-    // Always load base data from JSON file
-    const dataUrl = `${world.folder}/${world.dataFile}`;
-    const dataResp = await fetch(dataUrl);
-    if (dataResp.ok) {
-      const data = await dataResp.json();
-      
-      // Import tags (use stored if available, otherwise from JSON)
-      if (storedTags) {
-        tags = storedTags;
-      } else if (Array.isArray(data.tags)) {
-        tags = data.tags.map((t) => ({
-          id: t.id ?? crypto.randomUUID(),
-          title: t.title ?? "",
-          notes: t.notes ?? "",
-          position: t.position ?? { x: 0, y: 0, z: 0 },
-          radius: t.radius ?? 1,
-        }));
-      }
-      
-      // Import assets from JSON, applying localStorage deltas
-      if (Array.isArray(data.assets)) {
-        for (const rawAsset of data.assets) {
-          const asset = normalizeAssetSchema(rawAsset);
-          
-          // Apply localStorage delta if exists
-          const delta = storedDeltas[asset.id];
-          if (delta) {
-            if (delta.currentStateId) asset.currentStateId = delta.currentStateId;
-            if (delta.transform) asset.transform = delta.transform;
-            if (delta.pickable !== undefined) asset.pickable = delta.pickable;
-            if (delta.castShadow !== undefined) asset.castShadow = delta.castShadow;
-            if (delta.receiveShadow !== undefined) asset.receiveShadow = delta.receiveShadow;
-            if (delta.blobShadow) asset.blobShadow = delta.blobShadow;
-            console.log(`[WORLD] Applied delta to asset: ${asset.id}`);
-          }
-          
-          assets.push(asset);
-          try {
-            await instantiateAsset(asset);
-          } catch (err) {
-            console.warn(`Failed to instantiate asset ${asset.id}:`, err);
-          }
-        }
-      }
-      console.log(`[WORLD] Loaded ${assets.length} assets from JSON for ${world.id}`);
-      
-      // Load primitives from JSON if not already loaded from localStorage
-      if (!storedPrimitives && Array.isArray(data.primitives)) {
-        primitives = data.primitives;
-      }
-      // Load lights from JSON if not already loaded from localStorage
-      if (!storedLights && Array.isArray(data.lights)) {
-        editorLights = data.lights;
-      }
-    }
-    
-    // Add portals from localStorage (they're not in the JSON file)
-    for (const portalData of storedPortals) {
-      const portal = normalizeAssetSchema(portalData);
-      console.log(`[WORLD] Adding portal from localStorage: ${portal.id} → ${portal.destinationWorld}`);
-      assets.push(portal);
-      try {
-        await instantiateAsset(portal);
-      } catch (err) {
-        console.warn(`Failed to instantiate portal ${portal.id}:`, err);
-      }
-    }
-    
-    if (storedPortals.length > 0) {
-      console.log(`[WORLD] ✓ Added ${storedPortals.length} portals from localStorage`);
-    }
-
-    // Load primitives (from localStorage first, fall back to stored)
-    if (storedPrimitives) {
-      primitives = storedPrimitives;
-    }
-    for (const p of primitives) {
-      try { instantiatePrimitive(p); } catch (err) {
-        console.warn(`Failed to instantiate primitive ${p.id}:`, err);
-      }
-    }
-    console.log(`[WORLD] Loaded ${primitives.length} primitives`);
-
-    // Load editor lights (from localStorage first, fall back to stored)
-    if (storedLights) {
-      editorLights = storedLights;
-    }
-    for (const ld of editorLights) {
-      ld._lightObj = null;
-      ld._helperObj = null;
-      ld._proxyObj = null;
-      try { instantiateEditorLight(ld); } catch (err) {
-        console.warn(`Failed to instantiate light ${ld.id}:`, err);
-      }
-    }
-    console.log(`[WORLD] Loaded ${editorLights.length} editor lights`);
-
-    // Load groups (from localStorage first, fall back to JSON data)
-    if (storedGroups) {
-      groups = storedGroups;
-    } else if (Array.isArray(data?.groups)) {
-      groups = data.groups;
-    } else {
-      groups = [];
-    }
-    console.log(`[WORLD] Loaded ${groups.length} groups`);
-
-    renderTagsList();
-    renderAssetsList();
-    renderPrimitivesList();
-    renderLightsList();
-    // Clear selections
-    selectedTagId = null;
-    draftTag = null;
-    selectedPrimitiveId = null;
-    selectedLightId = null;
-    selectedGroupId = null;
-    selectAsset(null);
-    renderPrimitiveProps();
-    renderLightProps();
-    rebuildTagMarkers();
-    
-    // Restore any pending portal links for portals in this world
-    restorePortalLinks();
-
-    // Enable shadow map if any imported light casts shadows
-    syncShadowMapEnabled();
-
-    setStatus(`✓ ${world.name} loaded`);
-  } catch (err) {
-    console.error("Failed to load world:", err);
-    setStatus(`Error: ${err.message}`);
-  }
-}
-
-// Hook up world selector UI
-worldLoadBtn?.addEventListener("click", () => {
-  const worldId = worldSelectEl?.value;
-  if (worldId) loadWorld(worldId);
-});
-
-// Double-click to load
-worldSelectEl?.addEventListener("dblclick", () => {
-  const worldId = worldSelectEl?.value;
-  if (worldId) loadWorld(worldId);
-});
+// World loading system removed - now using /sims/ directory for scene loading
 
 window.addEventListener("resize", () => {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -11640,87 +10797,6 @@ async function _doRapierInit() {
   characterController.setMaxSlopeClimbAngle(Math.PI / 3);
   characterController.setMinSlopeSlideAngle(Math.PI / 2);
 }
-
-async function buildRapierTriMeshColliderFromGLB(gltfScene) {
-  await ensureRapierLoaded();
-
-  // Remove voxel colliders if present.
-  if (worldBody?.__voxelColliders) {
-    for (const c of worldBody.__voxelColliders) rapierWorld.removeCollider(c, true);
-    worldBody.__voxelColliders = [];
-  }
-  voxelGrid = null;
-
-  // Remove old trimesh collider if present.
-  if (worldTriMeshCollider) {
-    rapierWorld.removeCollider(worldTriMeshCollider, true);
-    worldTriMeshCollider = null;
-  }
-
-  const verts = [];
-  const indices = [];
-  let vertBase = 0;
-  const tmpPos = new THREE.Vector3();
-
-  gltfScene.updateMatrixWorld(true);
-  gltfScene.traverse((obj) => {
-    if (!obj.isMesh) return;
-    const geom = obj.geometry;
-    if (!geom) return;
-    const posAttr = geom.attributes?.position;
-    if (!posAttr) return;
-    const indexAttr = geom.index;
-    const matWorld = obj.matrixWorld;
-
-    for (let i = 0; i < posAttr.count; i++) {
-      tmpPos.fromBufferAttribute(posAttr, i).applyMatrix4(matWorld);
-      verts.push(tmpPos.x, tmpPos.y, tmpPos.z);
-    }
-
-    if (indexAttr) {
-      for (let i = 0; i < indexAttr.count; i++) indices.push(indexAttr.getX(i) + vertBase);
-    } else {
-      for (let i = 0; i < posAttr.count; i++) indices.push(vertBase + i);
-    }
-    vertBase += posAttr.count;
-  });
-
-  if (verts.length === 0 || indices.length < 3) {
-    setStatus("GLB had no mesh geometry for collision.");
-    return;
-  }
-
-  setStatus(`Building GLB TriMesh collider… (verts=${verts.length / 3}, tris=${indices.length / 3})`);
-  const desc = RAPIER.ColliderDesc.trimesh(verts, indices).setFriction(0.8);
-  worldTriMeshCollider = rapierWorld.createCollider(desc);
-
-  const box = new THREE.Box3().setFromObject(gltfScene);
-  const c = box.getCenter(new THREE.Vector3());
-  teleportPlayerTo(c.x, box.max.y + 2.0, c.z);
-  setGhostMode(true);
-  setStatus("GLB TriMesh collider ready. Spawned near center (ghost ON). Press G to disable ghost.");
-}
-
-let collisionGLBScene = null;
-collisionGlbInputEl?.addEventListener("change", async (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  setCollisionMode("glb-trimesh");
-  try {
-    const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
-    const loader = new GLTFLoader();
-    const url = URL.createObjectURL(file);
-    const gltf = await new Promise((resolve, reject) => {
-      loader.load(url, (g) => resolve(g), undefined, (err) => reject(err));
-    });
-    URL.revokeObjectURL(url);
-    collisionGLBScene = gltf.scene;
-    await buildRapierTriMeshColliderFromGLB(collisionGLBScene);
-  } catch (err) {
-    console.error(err);
-    setStatus(err?.message || "Failed to load GLB for collision.");
-  }
-});
 
 async function buildRapierVoxelColliderFromSplat(mesh) {
   await ensureRapierLoaded();
@@ -11908,10 +10984,6 @@ async function buildRapierVoxelColliderFromSplat(mesh) {
     for (const c of worldBody.__voxelColliders) rapierWorld.removeCollider(c, true);
   }
   worldBody.__voxelColliders = [];
-  if (worldTriMeshCollider) {
-    rapierWorld.removeCollider(worldTriMeshCollider, true);
-    worldTriMeshCollider = null;
-  }
 
   const visited = new Uint8Array(occ.length);
   const maxColliders = 6000;
@@ -12466,18 +11538,15 @@ function updateInteractionHint() {
   _crosshairEl?.classList.remove("holding");
   
   const target = getInteractableAssetAtCrosshair();
-  
+
   if (target) {
-    const { kind, asset, group, actions, dist, canPickUp, isPortal } = target;
+    const { kind, asset, group, actions, dist, canPickUp } = target;
     const title = kind === "group" ? (group?.name || "(group)") : (asset.title || "(asset)");
-    
+
     // Build action description
     let actionText;
     if (kind === "group") {
       actionText = "Pick up";
-    } else if (isPortal) {
-      const destWorld = WORLDS_MANIFEST.find(w => w.id === asset.destinationWorld);
-      actionText = `Enter → ${destWorld?.name || asset.destinationWorld}`;
     } else if (actions.length === 0 && canPickUp) {
       actionText = "Pick up";
     } else if (actions.length === 1 && !canPickUp) {
@@ -12651,14 +11720,6 @@ window.debugColliders = function() {
   // Show tracked map
   console.log("[DEBUG] === _assetColliderHandles Map ===");
   console.log(`Map size: ${_assetColliderHandles.size}`);
-  
-  // Show portal assets
-  console.log("[DEBUG] === PORTALS ===");
-  const portals = assets.filter(a => a.isPortal);
-  console.log(`Portal count: ${portals.length}`);
-  portals.forEach(p => {
-    console.log(`  ${p.id}: "${p.title}", hasCollider=${!!p._colliderHandle}`);
-  });
 };
 
 // Debug: Remove all colliders except world/player

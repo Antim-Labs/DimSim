@@ -26,17 +26,6 @@
       <!-- Crosshair -->
       <div id="crosshair" aria-hidden="true"></div>
 
-      <!-- Portal Loading Screen -->
-      <div id="portal-loading" class="portal-loading hidden">
-        <div class="portal-loading-content">
-          <div class="portal-loading-effect"><div class="portal-ring"></div><div class="portal-ring"></div><div class="portal-ring"></div></div>
-          <div class="portal-loading-text">
-            <span id="portal-loading-title">Traveling through portal...</span>
-            <span id="portal-loading-dest"></span>
-          </div>
-        </div>
-      </div>
-
       <!-- Agent Panel (full sim panel — engine binds to #agent-panel) -->
       <div id="agent-panel" class="side-panel sim-only">
         <div class="panel-header">
@@ -54,9 +43,6 @@
               <button id="sim-load-btn" type="button" class="tb-btn tb-primary" title="Load">Load</button>
             </div>
             <div id="scene-info" style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:4px;">No scene loaded</div>
-            <!-- Hidden: world-select and file import for engine compat -->
-            <select id="world-select" class="tb-select" style="display:none;"><option value="">Environment</option></select>
-            <button id="world-load" type="button" style="display:none;">Load</button>
             <input id="sim-level-import" type="file" accept=".json" style="display:none;" />
 
             <div style="margin-top:6px; display:flex; gap:6px;">
