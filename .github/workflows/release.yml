@@ -22,6 +22,26 @@ jobs:
         with:
           deno-version: v2.x
 
+      # Derive version from tag (v0.1.15 -> 0.1.15)
+      - name: Set version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      # Generate scenes.json from template + tag version
+      - name: Generate scenes.json
+        run: |
+          jq --arg v "$VERSION" \
+             --arg base "https://dimsim-assets.s3.amazonaws.com/v$VERSION" \
+             '{
+               version: $v,
+               coreUrl: "\($base)/dimsim-core-v\($v).tar.gz",
+               scenes: (.scenes | to_entries | map({
+                 key: .key,
+                 value: (.value + { url: "\($base)/scene-\(.key)-v\($v).tar.gz" })
+               }) | from_entries)
+             }' scenes.template.json > scenes.json
+          echo "Generated scenes.json:"
+          cat scenes.json
+
       # Build frontend
       - name: Install npm deps
         run: npm ci
@@ -31,14 +51,14 @@ jobs:
 
       # Package release artifacts
       - name: Package release
-        run: bash scripts/package-release.sh "${GITHUB_REF_NAME#v}"
+        run: bash scripts/package-release.sh "$VERSION"
 
       # Create GitHub Release with tarballs
       - name: Create GitHub Release
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            "dimsim-core-v${GITHUB_REF_NAME#v}.tar.gz" \
-            "scene-apt-v${GITHUB_REF_NAME#v}.tar.gz" \
+            "dimsim-core-v${VERSION}.tar.gz" \
+            "scene-apt-v${VERSION}.tar.gz" \
             --title "DimSim ${GITHUB_REF_NAME}" \
             --generate-notes
         env:
@@ -47,7 +67,6 @@ jobs:
       # Upload assets to S3
       - name: Upload to S3
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
           aws s3 cp "dimsim-core-v${VERSION}.tar.gz" "s3://dimsim-assets/${GITHUB_REF_NAME}/"
           aws s3 cp "scene-apt-v${VERSION}.tar.gz" "s3://dimsim-assets/${GITHUB_REF_NAME}/"
           aws s3 cp scenes.json s3://dimsim-assets/scenes.json
