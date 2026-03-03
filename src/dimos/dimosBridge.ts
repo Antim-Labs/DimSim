@@ -27,11 +27,17 @@ const CH_DEPTH = "/depth_image#sensor_msgs.Image";
 const CH_LIDAR = "/lidar#sensor_msgs.PointCloud2";
 
 // -- Default publish rates (ms) ----------------------------------------------
-const DEFAULT_RATES: PublishRates = { odom: 100, sensors: 500 }; // 10 Hz odom, 2 Hz sensors
+const DEFAULT_RATES: PublishRates = { odom: 50, lidar: 200, images: 500 }; // 20 Hz odom, 5 Hz lidar, 2 Hz images
 
 // -- Types --------------------------------------------------------------------
 
-export interface PublishRates { odom: number; sensors: number; }
+export interface PublishRates { odom: number; lidar: number; images: number; }
+
+export interface RgbFrame {
+  data: Uint8Array;
+  width: number;
+  height: number;
+}
 
 export interface DepthFrame {
   data: Float32Array;
@@ -51,7 +57,7 @@ export interface OdomPose {
 }
 
 export interface SensorSources {
-  captureRgb: () => Promise<string | null>;
+  captureRgb: () => RgbFrame | null;
   captureDepth: () => DepthFrame | null;
   captureLidar: () => LidarFrame | null;
   getOdomPose: () => OdomPose | null;
@@ -82,12 +88,13 @@ export class DimosBridge {
   get ws(): WebSocket | null { return this.wsControl; }
 
   _timers: Record<string, ReturnType<typeof setInterval>>;
-  _dirty: { odom: boolean; sensors: boolean };
+  _dirty: { odom: boolean; lidar: boolean; images: boolean };
   _rafId: number | null;
   _connected: boolean;
 
   _cmdVel: { linX: number; linY: number; linZ: number; angX: number; angY: number; angZ: number } | null;
   _cmdVelStamp: number;
+  _serverLidar: boolean;
 
   constructor({ wsUrl, agent, sensorSources, rates, frameTransform }: DimosBridgeOptions) {
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -99,11 +106,12 @@ export class DimosBridge {
     this.wsControl = null;
     this.wsSensors = null;
     this._timers = {};
-    this._dirty = { odom: false, sensors: false };
+    this._dirty = { odom: false, lidar: false, images: false };
     this._rafId = null;
     this._connected = false;
     this._cmdVel = null;
     this._cmdVelStamp = 0;
+    this._serverLidar = false;
   }
 
   connect(): void {
@@ -192,8 +200,11 @@ export class DimosBridge {
 
   // -- Outgoing sensor data ---------------------------------------------------
 
+  sceneReady = false;
+
   _startPublishing(): void {
-    this._timers.sensors = setInterval(() => { this._dirty.sensors = true; }, this.rates.sensors);
+    // No lidar timer — server-side lidar handles it via LCM directly.
+    // No images timer — camera stream disabled for now.
   }
 
   _makeHeader(frameId: string): any {
@@ -208,11 +219,14 @@ export class DimosBridge {
     this._publishOdomSync(this._makeHeader("world"));
   }
 
-  _publishSensors(): void {
-    // Only lidar for nav — skip RGB/depth to save bandwidth
-    // LiDAR points are currently emitted in world coordinates.
-    // Keep frame_id consistent with data to avoid TF/map misalignment.
+  _publishLidar(): void {
     this._publishLidarSync(this._makeHeader("world"));
+  }
+
+  _publishImages(): void {
+    const camHeader = this._makeHeader("camera_optical");
+    this._publishRgbSync(camHeader);
+    this._publishDepthSync(camHeader);
   }
 
   // -- Odom -------------------------------------------------------------------
@@ -286,26 +300,20 @@ export class DimosBridge {
 
   // -- RGB --------------------------------------------------------------------
 
-  async _publishRgbSync(header: any): Promise<void> {
+  _publishRgbSync(header: any): void {
     try {
-      const base64 = await this.sensors.captureRgb();
-      if (!base64) return;
-
-      const binaryStr = atob(base64);
-      const jpegBytes = new Uint8Array(binaryStr.length);
-      for (let i = 0; i < binaryStr.length; i++) jpegBytes[i] = binaryStr.charCodeAt(i);
-
-      const dims = _parseJpegDimensions(jpegBytes);
+      const frame = this.sensors.captureRgb();
+      if (!frame) return;
 
       this._sendSensor(CH_IMAGE, new sensor_msgs.Image({
         header,
-        height: dims.height,
-        width: dims.width,
-        encoding: "jpeg",
+        height: frame.height,
+        width: frame.width,
+        encoding: "rgba8",
         is_bigendian: 0,
-        step: 0,
-        data_length: jpegBytes.length,
-        data: jpegBytes,
+        step: frame.width * 4,
+        data_length: frame.data.length,
+        data: frame.data,
       }));
     } catch (e) {
       console.warn("[DimosBridge] RGB publish error:", e);
@@ -400,15 +408,3 @@ export class DimosBridge {
   }
 }
 
-// -- Helpers ------------------------------------------------------------------
-
-function _parseJpegDimensions(bytes: Uint8Array): { width: number; height: number } {
-  for (let i = 0; i < bytes.length - 9; i++) {
-    if (bytes[i] !== 0xff) continue;
-    const marker = bytes[i + 1];
-    if ((marker >= 0xc0 && marker <= 0xcf) && marker !== 0xc4 && marker !== 0xc8) {
-      return { width: (bytes[i + 7] << 8) | bytes[i + 8], height: (bytes[i + 5] << 8) | bytes[i + 6] };
-    }
-  }
-  return { width: 960, height: 432 };
-}

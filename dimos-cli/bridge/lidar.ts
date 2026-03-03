@@ -1,0 +1,250 @@
+/**
+ * Server-side LiDAR raycasting using Rapier physics world snapshot.
+ *
+ * Runs 20K Fibonacci-sphere raycasts at 5 Hz on the Deno bridge server,
+ * encodes PointCloud2 via @dimos/msgs, and publishes directly to LCM —
+ * no WebSocket hop needed.
+ */
+
+import {
+  sensor_msgs,
+  std_msgs,
+} from "@dimos/msgs";
+import type { LCM } from "../vendor/lcm/lcm.ts";
+
+// -- Lidar constants (must match engine.js) -----------------------------------
+const NUM_POINTS = 20000;
+const MIN_RANGE = 0.1;
+const MAX_RANGE = 5;
+const V_MIN_RAD = (-30 * Math.PI) / 180;
+const V_MAX_RAD = (15 * Math.PI) / 180;
+const RATE_MS = 200; // 5 Hz
+
+const CH_LIDAR = "/lidar#sensor_msgs.PointCloud2";
+
+// Agent capsule geometry → lidar mount offset (must match engine.js)
+const PLAYER_HALF_HEIGHT = 0.25;
+const PLAYER_RADIUS = 0.12;
+const LIDAR_MOUNT_HEIGHT = 0.35;
+// Net Y offset from capsule center (odom position) to lidar origin:
+// groundY = agentY - (HALF_HEIGHT + RADIUS), lidarY = groundY + MOUNT_HEIGHT
+const LIDAR_Y_OFFSET = LIDAR_MOUNT_HEIGHT - (PLAYER_HALF_HEIGHT + PLAYER_RADIUS); // -0.02
+
+// -- _lidarToCamQuat: transforms FLU (x=forward, y=left, z=up) → Three.js camera-local --
+// Matches engine.js _lidarToCamQuat derived from rotation matrix:
+//   FLU x(forward) → cam -z,  FLU y(left) → cam -x,  FLU z(up) → cam +y
+// Quaternion: (0.5, -0.5, -0.5, -0.5)
+const L2C_QX = 0.5, L2C_QY = -0.5, L2C_QZ = -0.5, L2C_QW = -0.5;
+
+// -- Pre-compute Fibonacci sphere ray directions (pre-rotated to camera-local) -
+// Directions are computed in FLU frame then rotated by _lidarToCamQuat so that
+// only the agent's yaw quaternion is needed at scan time (cam-local → world).
+const fibDirs = (() => {
+  const golden = (1 + Math.sqrt(5)) / 2;
+  const zMin = Math.sin(V_MIN_RAD);
+  const zMax = Math.sin(V_MAX_RAD);
+  const dirs = new Float32Array(NUM_POINTS * 3);
+  for (let i = 0; i < NUM_POINTS; i++) {
+    const z = zMin + (zMax - zMin) * (i + 0.5) / NUM_POINTS;
+    const r = Math.sqrt(1 - z * z);
+    const phi = (2 * Math.PI * i) / golden;
+    const fx = r * Math.cos(phi); // FLU x
+    const fy = r * Math.sin(phi); // FLU y
+    const fz = z;                 // FLU z
+
+    // Rotate FLU → camera-local using _lidarToCamQuat
+    const tx = 2 * (L2C_QY * fz - L2C_QZ * fy);
+    const ty = 2 * (L2C_QZ * fx - L2C_QX * fz);
+    const tz = 2 * (L2C_QX * fy - L2C_QY * fx);
+    dirs[i * 3 + 0] = fx + L2C_QW * tx + (L2C_QY * tz - L2C_QZ * ty);
+    dirs[i * 3 + 1] = fy + L2C_QW * ty + (L2C_QZ * tx - L2C_QX * tz);
+    dirs[i * 3 + 2] = fz + L2C_QW * tz + (L2C_QX * ty - L2C_QY * tx);
+  }
+  return dirs;
+})();
+
+// -- Quaternion rotation helper (q * v) ---------------------------------------
+function rotateByQuat(
+  vx: number, vy: number, vz: number,
+  qx: number, qy: number, qz: number, qw: number,
+): [number, number, number] {
+  // t = 2 * cross(q.xyz, v)
+  const tx = 2 * (qy * vz - qz * vy);
+  const ty = 2 * (qz * vx - qx * vz);
+  const tz = 2 * (qx * vy - qy * vx);
+  // result = v + qw * t + cross(q.xyz, t)
+  return [
+    vx + qw * tx + (qy * tz - qz * ty),
+    vy + qw * ty + (qz * tx - qx * tz),
+    vz + qw * tz + (qx * ty - qy * tx),
+  ];
+}
+
+// -- ServerLidar --------------------------------------------------------------
+
+export class ServerLidar {
+  private lcm: LCM;
+  private world: any; // RAPIER.World
+  private RAPIER: any;
+  private sentSeqs: Set<number>; // echo filter shared with bridge server
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private scanCount = 0;
+  private logN = 0;
+  private publishing = false; // busy guard — skip scan if previous publish still in flight
+
+  // Current robot pose (Three.js Y-up world frame)
+  private px = 0;
+  private py = 0;
+  private pz = 0;
+  private qx = 0;
+  private qy = 0;
+  private qz = 0;
+  private qw = 1;
+  private hasPose = false;
+
+  constructor(lcm: LCM, rapierWorld: any, RAPIER: any, sentSeqs: Set<number>) {
+    this.lcm = lcm;
+    this.world = rapierWorld;
+    this.RAPIER = RAPIER;
+    this.sentSeqs = sentSeqs;
+    // Step once with zero dt to initialize the query pipeline after snapshot restore.
+    // queryPipeline.update() crashes on restored worlds (WASM type mismatch),
+    // but world.step() internally updates the pipeline correctly.
+    this.world.step();
+  }
+
+  /** Update robot pose. Position is capsule center (odom); we apply lidar mount offset internally. */
+  updatePose(x: number, y: number, z: number, qx: number, qy: number, qz: number, qw: number): void {
+    this.px = x;
+    this.py = y + LIDAR_Y_OFFSET; // capsule center → lidar mount height
+    this.pz = z;
+    this.qx = qx;
+    this.qy = qy;
+    this.qz = qz;
+    this.qw = qw;
+    this.hasPose = true;
+  }
+
+  start(): void {
+    if (this.timer) return;
+    console.log(`[lidar] started ${1000 / RATE_MS}Hz server-side raycasting (${NUM_POINTS} pts)`);
+    this.timer = setInterval(() => this._scan(), RATE_MS);
+  }
+
+  stop(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  private _scan(): void {
+    if (!this.hasPose || this.publishing) return;
+    this.publishing = true;
+    this._doScan().catch((e) => {
+      console.warn("[lidar] publish error (dropped frame):", e?.message || e);
+    }).finally(() => { this.publishing = false; });
+  }
+
+  private async _doScan(): Promise<void> {
+      this.scanCount++;
+      const jitterAngle = this.scanCount * 2.399963; // golden angle per scan
+      const cosJ = Math.cos(jitterAngle);
+      const sinJ = Math.sin(jitterAngle);
+
+      const RAPIER = this.RAPIER;
+      const world = this.world;
+
+      // Pre-allocate output buffers
+      const worldPts = new Float32Array(NUM_POINTS * 3);
+      const intensity = new Float32Array(NUM_POINTS);
+      let n = 0;
+
+      const ox = this.px, oy = this.py, oz = this.pz;
+      const rqx = this.qx, rqy = this.qy, rqz = this.qz, rqw = this.qw;
+
+      for (let i = 0; i < NUM_POINTS; i++) {
+        // Fibonacci direction (pre-rotated to camera-local) with per-scan golden angle jitter.
+        // In FLU frame, jitter rotates around Z (up). After lidarToCamQuat, FLU Z → cam Y,
+        // so jitter must rotate around camera-local Y axis.
+        const fx = fibDirs[i * 3 + 0], fy = fibDirs[i * 3 + 1], fz = fibDirs[i * 3 + 2];
+        const lx =  fx * cosJ + fz * sinJ;
+        const ly =  fy;
+        const lz = -fx * sinJ + fz * cosJ;
+
+        // Rotate local direction by robot quaternion → world direction
+        const [dx, dy, dz] = rotateByQuat(lx, ly, lz, rqx, rqy, rqz, rqw);
+        const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (len < 1e-8) continue;
+        const nx = dx / len, ny = dy / len, nz = dz / len;
+
+        const ray = new RAPIER.Ray({ x: ox, y: oy, z: oz }, { x: nx, y: ny, z: nz });
+        // Use world.castRay (not queryPipeline.castRayAndGetNormal) —
+        // the pipeline API crashes on restored snapshot worlds.
+        const hit = world.castRay(ray, MAX_RANGE, false);
+
+        if (!hit) continue;
+        const toi = hit.timeOfImpact ?? 0;
+        if (toi < MIN_RANGE || toi > MAX_RANGE) continue;
+
+        worldPts[n * 3 + 0] = ox + nx * toi;
+        worldPts[n * 3 + 1] = oy + ny * toi;
+        worldPts[n * 3 + 2] = oz + nz * toi;
+        intensity[n] = 1.0 / (1.0 + 0.02 * toi * toi);
+        n++;
+      }
+
+      if (n === 0) return;
+
+      this.logN++;
+      if (this.logN <= 3 || this.logN % 100 === 0) {
+        console.log(`[lidar] scan #${this.logN}: ${n} pts`);
+      }
+
+      // Encode PointCloud2: Y-up → Z-up (ROS) cyclic permutation x→y, y→z, z→x
+      const pointStep = 16;
+      const buf = new ArrayBuffer(n * pointStep);
+      const view = new DataView(buf);
+
+      for (let i = 0; i < n; i++) {
+        const off = i * pointStep;
+        const tx = worldPts[i * 3 + 0];
+        const ty = worldPts[i * 3 + 1];
+        const tz = worldPts[i * 3 + 2];
+        view.setFloat32(off, tz, true);       // ROS x = Three.js z
+        view.setFloat32(off + 4, tx, true);   // ROS y = Three.js x
+        view.setFloat32(off + 8, ty, true);   // ROS z = Three.js y
+        view.setFloat32(off + 12, intensity[i], true);
+      }
+
+      const now = Date.now();
+      const header = new std_msgs.Header({
+        stamp: new std_msgs.Time({ sec: Math.floor(now / 1000), nsec: (now % 1000) * 1_000_000 }),
+        frame_id: "world",
+      });
+
+      const msg = new sensor_msgs.PointCloud2({
+        header,
+        height: 1,
+        width: n,
+        fields_length: 4,
+        fields: [
+          new sensor_msgs.PointField({ name: "x", offset: 0, datatype: 7, count: 1 }),
+          new sensor_msgs.PointField({ name: "y", offset: 4, datatype: 7, count: 1 }),
+          new sensor_msgs.PointField({ name: "z", offset: 8, datatype: 7, count: 1 }),
+          new sensor_msgs.PointField({ name: "intensity", offset: 12, datatype: 7, count: 1 }),
+        ],
+        is_bigendian: false,
+        point_step: pointStep,
+        row_step: n * pointStep,
+        data_length: n * pointStep,
+        data: new Uint8Array(buf),
+        is_dense: true,
+      });
+
+      // Mark seq for echo filtering (prevent server re-forwarding to browser WS)
+      this.sentSeqs.add(this.lcm.getNextSeq());
+      // Publish directly to LCM — no WS hop (await so buffer pressure is felt)
+      await this.lcm.publish(CH_LIDAR, msg);
+  }
+}

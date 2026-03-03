@@ -111,6 +111,29 @@ async function extractGz(archive: string, destFile: string): Promise<void> {
   if (!status.success) throw new Error(`gunzip failed (exit ${status.code})`);
 }
 
+// ── Version tracking ────────────────────────────────────────────────────
+
+interface VersionInfo {
+  core?: string;
+  scenes?: Record<string, string>;
+}
+
+function versionPath(): string {
+  return `${getDimsimHome()}/version.json`;
+}
+
+async function readVersionInfo(): Promise<VersionInfo> {
+  try {
+    return JSON.parse(await Deno.readTextFile(versionPath()));
+  } catch {
+    return {};
+  }
+}
+
+async function writeVersionInfo(info: VersionInfo): Promise<void> {
+  await Deno.writeTextFile(versionPath(), JSON.stringify(info, null, 2));
+}
+
 // ── Public API ──────────────────────────────────────────────────────────
 
 export async function setup(localArchive?: string): Promise<void> {
@@ -125,11 +148,24 @@ export async function setup(localArchive?: string): Promise<void> {
     await extractTarGz(localArchive, distDir);
   } else {
     const registry = await fetchRegistry();
-    const tmpFile = `${home}/core-download.tar.gz`;
-    await download(registry.coreUrl, tmpFile);
-    console.log(`[dimsim] Extracting core assets...`);
-    await extractTarGz(tmpFile, distDir);
-    await Deno.remove(tmpFile);
+    const local = await readVersionInfo();
+
+    if (local.core === registry.version) {
+      console.log(`[dimsim] Core already up-to-date (v${registry.version})`);
+    } else {
+      if (local.core) {
+        console.log(`[dimsim] Updating core: v${local.core} → v${registry.version}`);
+      }
+      const tmpFile = `${home}/core-download.tar.gz`;
+      await download(registry.coreUrl, tmpFile);
+      console.log(`[dimsim] Extracting core assets...`);
+      await extractTarGz(tmpFile, distDir);
+      await Deno.remove(tmpFile);
+
+      // Write updated version
+      local.core = registry.version;
+      await writeVersionInfo(local);
+    }
   }
 
   // Ensure sims directory exists
@@ -183,12 +219,29 @@ export async function sceneInstall(
       }
       Deno.exit(1);
     }
+
+    const local = await readVersionInfo();
+    const localSceneVer = local.scenes?.[name];
+
+    if (localSceneVer === registry.version) {
+      console.log(`[dimsim] Scene '${name}' already up-to-date (v${registry.version})`);
+      return;
+    }
+
+    if (localSceneVer) {
+      console.log(`[dimsim] Updating scene '${name}': v${localSceneVer} → v${registry.version}`);
+    }
     const tmpFile = `${home}/${name}-download.gz`;
     console.log(`[dimsim] Downloading scene '${name}' (${(entry.size / 1e6).toFixed(1)} MB)...`);
     await download(entry.url, tmpFile);
     console.log(`[dimsim] Extracting...`);
     await extractGz(tmpFile, destFile);
     await Deno.remove(tmpFile);
+
+    // Write updated version
+    if (!local.scenes) local.scenes = {};
+    local.scenes[name] = registry.version;
+    await writeVersionInfo(local);
   }
 
   // Update local manifest

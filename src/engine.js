@@ -1514,15 +1514,35 @@ function updateRgbdPcOverlayCloud(force = false) {
 // -----------------------------------------------------------------------------
 // We use lidar->world pose convention for pose_T_world_lidar (T_w_l).
 // i.e. p_world = T_w_l * p_lidar
-const LIDAR_SCAN_DURATION_S = 0.1; // 10 Hz spinning lidar
-const LIDAR_NUM_RINGS = 32;
-const LIDAR_NUM_AZ_BINS = 1024;
-const LIDAR_MAX_POINTS = LIDAR_NUM_RINGS * LIDAR_NUM_AZ_BINS;
-const LIDAR_MIN_RANGE_M = 0.2;
-const LIDAR_MAX_RANGE_M = 3;
-const LIDAR_RANGE_IMAGE_W = 1024; // optional dense azimuth bins for range image export
-const LIDAR_V_MIN_RAD = THREE.MathUtils.degToRad(-30);
-const LIDAR_V_MAX_RAD = THREE.MathUtils.degToRad(10);
+// Livox Mid-360 sensor model (non-repetitive Fibonacci scan pattern)
+const LIDAR_SCAN_DURATION_S = 0.1; // 10 Hz scan rate
+const LIDAR_NUM_POINTS = 20000;    // points per scan (dense enough for consistent column coverage)
+const LIDAR_MAX_POINTS = LIDAR_NUM_POINTS;
+const LIDAR_MIN_RANGE_M = 0.1;     // Mid-360: 0.1m min
+const LIDAR_MAX_RANGE_M = 5;
+const LIDAR_V_MIN_RAD = THREE.MathUtils.degToRad(-30);  // sees ground ~0.6m from robot
+const LIDAR_V_MAX_RAD = THREE.MathUtils.degToRad(15);   // 15° up avoids ceiling, focuses rays on walls/ground
+// Legacy constants kept for browser UI range image (not used by dimos path)
+const LIDAR_NUM_RINGS = 1;
+const LIDAR_RANGE_IMAGE_W = 1;
+let _lidarScanCount = 0;
+
+// Pre-compute Fibonacci sphere ray directions (uniform sampling on spherical cap)
+const _fibLidarDirs = (() => {
+  const golden = (1 + Math.sqrt(5)) / 2;
+  const zMin = Math.sin(LIDAR_V_MIN_RAD); // sin(-7°) ≈ -0.122
+  const zMax = Math.sin(LIDAR_V_MAX_RAD); // sin(52°) ≈ 0.788
+  const dirs = new Float32Array(LIDAR_NUM_POINTS * 3);
+  for (let i = 0; i < LIDAR_NUM_POINTS; i++) {
+    const z = zMin + (zMax - zMin) * (i + 0.5) / LIDAR_NUM_POINTS;
+    const r = Math.sqrt(1 - z * z);
+    const phi = 2 * Math.PI * i / golden;
+    dirs[i * 3 + 0] = r * Math.cos(phi); // x (forward in FLU)
+    dirs[i * 3 + 1] = r * Math.sin(phi); // y (left in FLU)
+    dirs[i * 3 + 2] = z;                  // z (up in FLU)
+  }
+  return dirs;
+})();
 const LIDAR_ACCUM_FRAMES = 50;
 const LIDAR_STATS_INTERVAL_MS = 1500;
 const LIDAR_ACCUM_MIN_TRANSLATION_M = 0.08;
@@ -2157,27 +2177,25 @@ function updateLidarPointCloud() {
     if (a?.spineCollider) _lidarExcludeHandles.add(a.spineCollider.handle);
   }
 
-  // Spinning ring LiDAR (true XYZ in lidar frame), incremental over ~0.1s wall-clock.
-  const H = LIDAR_NUM_AZ_BINS;
-  const V = LIDAR_NUM_RINGS;
+  // Livox Mid-360 style: Fibonacci sphere sampling, incremental over ~0.1s wall-clock.
+  const N = LIDAR_NUM_POINTS;
   const scanDurationS = LIDAR_SCAN_DURATION_S;
   const scanDurationNs = Math.floor(scanDurationS * 1e9);
   if (!_lidarScanState) {
     const scanStartNs = nowNs();
+    _lidarScanCount++;
+    const jitterAngle = _lidarScanCount * 2.399963; // golden angle rotation per scan
     const rangeImg = new Float32Array(LIDAR_NUM_RINGS * LIDAR_RANGE_IMAGE_W);
     const intenImg = new Float32Array(LIDAR_NUM_RINGS * LIDAR_RANGE_IMAGE_W);
     const ringIdxImg = new Uint16Array(LIDAR_NUM_RINGS * LIDAR_RANGE_IMAGE_W);
-    for (let i = 0; i < rangeImg.length; i++) {
-      rangeImg[i] = Number.POSITIVE_INFINITY;
-      intenImg[i] = 0;
-      ringIdxImg[i] = 0;
-    }
     _lidarScanState = {
       scanStartNs,
       scanDurationS,
       scanDurationNs,
       scanSeed: (scanStartNs / 1e6) | 0,
-      nextHi: 0,
+      cosJitter: Math.cos(jitterAngle),
+      sinJitter: Math.sin(jitterAngle),
+      nextIdx: 0,
       n: 0,
       rawPts: new Float32Array(LIDAR_MAX_POINTS * 3),
       deskPts: new Float32Array(LIDAR_MAX_POINTS * 3),
@@ -2185,7 +2203,7 @@ function updateLidarPointCloud() {
       ring: new Uint16Array(LIDAR_MAX_POINTS),
       tArr: new Float32Array(LIDAR_MAX_POINTS),
       worldPts: new Float32Array(LIDAR_MAX_POINTS * 3),
-      colArray: new Float32Array(LIDAR_MAX_POINTS * 3), // private color buffer (never touches GPU display)
+      colArray: new Float32Array(LIDAR_MAX_POINTS * 3),
       rangeImg,
       intenImg,
       ringIdxImg,
@@ -2198,27 +2216,25 @@ function updateLidarPointCloud() {
   const pRawLocal = new THREE.Vector3();
   const elapsedNs = Math.max(0, nowNs() - st.scanStartNs);
   const progress = Math.min(1, elapsedNs / Math.max(1, st.scanDurationNs));
-  let targetHiExclusive = Math.floor(progress * H);
-  targetHiExclusive = Math.max(targetHiExclusive, Math.min(H, st.nextHi + 1));
-  if (elapsedNs >= st.scanDurationNs) targetHiExclusive = H;
+  let targetIdx = Math.floor(progress * N);
+  targetIdx = Math.max(targetIdx, Math.min(N, st.nextIdx + 1));
+  if (elapsedNs >= st.scanDurationNs) targetIdx = N;
 
-  for (let hi = st.nextHi; hi < targetHiExclusive; hi++) {
-    const az = -Math.PI + (2 * Math.PI * hi) / Math.max(1, H - 1);
-    for (let vi = 0; vi < V; vi++) {
+  const cosJ = st.cosJitter, sinJ = st.sinJitter;
+
+  for (let i = st.nextIdx; i < targetIdx; i++) {
+    {
       if (st.n >= LIDAR_MAX_POINTS) break;
-      const elev = lidarVerticalAngleForRing(vi);
-      const cosE = Math.cos(elev);
-      const sinE = Math.sin(elev);
-      const sampleIndex = hi * V + vi;
-      const tSec = (sampleIndex / Math.max(1, H * V - 1)) * scanDurationS;
+      // Fibonacci direction with per-scan golden-angle rotation around Z (non-repetitive)
+      const fx = _fibLidarDirs[i * 3 + 0], fy = _fibLidarDirs[i * 3 + 1], fz = _fibLidarDirs[i * 3 + 2];
+      const tSec = (i / Math.max(1, N - 1)) * scanDurationS;
       const stampNs = st.scanStartNs + Math.floor(tSec * 1e9);
       const pose = getLidarPoseAtNs(stampNs);
       const w2lNow = twlInverseMatrix(pose.pos, pose.quat);
       const origin = pose.pos;
 
-      // XYZ conversion from ring/azimuth/range in lidar frame (FLU):
-      // x = r*cos(elev)*cos(az), y = r*cos(elev)*sin(az), z = r*sin(elev)
-      dirLocal.set(cosE * Math.cos(az), cosE * Math.sin(az), sinE);
+      // Fibonacci direction rotated by per-scan golden angle (FLU frame)
+      dirLocal.set(fx * cosJ - fy * sinJ, fx * sinJ + fy * cosJ, fz);
       dirWorld.copy(dirLocal).applyQuaternion(pose.quat).normalize();
       const ray = new RAPIER.Ray(
         { x: origin.x, y: origin.y, z: origin.z },
@@ -2255,7 +2271,7 @@ function updateLidarPointCloud() {
       const ny = hitNormal?.y ?? 0;
       const nz = hitNormal?.z ?? 1;
       const incidence = hitNormal ? Math.max(0, -(dirWorld.x * nx + dirWorld.y * ny + dirWorld.z * nz)) : 0.7;
-      const reality = applyLidarRealityModel(toi, incidence, st.scanSeed, vi, hi);
+      const reality = applyLidarRealityModel(toi, incidence, st.scanSeed, i & 0xff, i >> 8);
       if (reality.dropped) continue;
       toi = reality.range;
 
@@ -2273,7 +2289,7 @@ function updateLidarPointCloud() {
       st.worldPts[st.n * 3 + 1] = pWorld.y;
       st.worldPts[st.n * 3 + 2] = pWorld.z;
 
-      st.ring[st.n] = vi;
+      st.ring[st.n] = 0;
       st.tArr[st.n] = tSec;
 
       const atten = 1.0 / (1.0 + 0.02 * toi * toi);
@@ -2294,17 +2310,11 @@ function updateLidarPointCloud() {
         st.colArray[st.n * 3 + 1] = g;
         st.colArray[st.n * 3 + 2] = g;
       }
-      // Range-image binning: rows=rings, cols=azimuth bins
-      const col = Math.min(LIDAR_RANGE_IMAGE_W - 1, Math.floor((hi / Math.max(1, H - 1)) * (LIDAR_RANGE_IMAGE_W - 1)));
-      const idx = vi * LIDAR_RANGE_IMAGE_W + col;
-      st.rangeImg[idx] = toi;
-      st.intenImg[idx] = st.intensity[st.n];
-      st.ringIdxImg[idx] = vi;
       st.n++;
     }
   }
-  st.nextHi = targetHiExclusive;
-  if (st.nextHi < H) {
+  st.nextIdx = targetIdx;
+  if (st.nextIdx < N) {
     // Keep LiDAR visible while a scan is still being built.
     // If we don't have accumulated frames yet, show the partial current scan.
     if (!lidarOrderedDebugView && _lidarAccumFrames.length === 0 && st.n > 0) {
@@ -11451,7 +11461,9 @@ function tick() {
   }
 
   // LiDAR / sensor overlays — run when explicitly enabled OR in dimos mode
-  if (simSensorViewMode === "lidar" || simCompareView || dimosMode) {
+  // In dimos mode, always skip browser raycasting — server handles lidar via Rapier snapshots.
+  const _skipBrowserLidar = dimosMode;
+  if (!_skipBrowserLidar && (simSensorViewMode === "lidar" || simCompareView || dimosMode)) {
     lidarVizGroup.visible = true;
     updateLidarPointCloud();
     if (_lidarGeom.drawRange.count <= 0 && _lidarLastNonZeroDrawCount > 0) {
@@ -11462,21 +11474,26 @@ function tick() {
     if (dimosMode && simSensorViewMode !== "lidar" && !simCompareView) {
       lidarVizGroup.visible = false;
     }
-  } else if (rgbdPcOverlayOnLidar && (simSensorViewMode === "lidar" || simCompareView)) {
+  } else if (!_skipBrowserLidar && rgbdPcOverlayOnLidar && (simSensorViewMode === "lidar" || simCompareView)) {
     updateRgbdPcOverlayCloud(false);
   }
 
-  pushLidarPoseSample();
+  if (!_skipBrowserLidar) pushLidarPoseSample();
 
   // Dimos sensor capture — GPU readback needs rAF, odom runs independently via setInterval
   if (dimosMode && window.__dimosBridge) {
     const bridge = window.__dimosBridge;
     if (bridge._connected) {
-      // Sensors only: GPU readback (RGB, depth, lidar) needs active render
-      if (bridge._dirty.sensors) {
-        bridge._dirty.sensors = false;
-        bridge._publishSensors();
+      // Lidar: skip browser→WS publish when server-side lidar is active
+      if (bridge._dirty.lidar && !bridge._serverLidar) {
+        bridge._dirty.lidar = false;
+        bridge._publishLidar();
       }
+      // Camera stream disabled for now.
+      // if (bridge._dirty.images) {
+      //   bridge._dirty.images = false;
+      //   bridge._publishImages();
+      // }
     }
   }
 
@@ -12873,16 +12890,13 @@ if (dimosMode) {
         renderer.setRenderTarget(prev);
 
         renderer.readRenderTargetPixels(_dimosCapTarget, 0, 0, _dimosCapW, _dimosCapH, _dimosCapBuf);
-        // Flip Y
-        const flipped = new Uint8ClampedArray(_dimosCapW * _dimosCapH * 4);
+        // Flip Y — return raw RGBA pixels (no JPEG encode)
+        const flipped = new Uint8Array(_dimosCapW * _dimosCapH * 4);
         const rowB = _dimosCapW * 4;
         for (let y = 0; y < _dimosCapH; y++) {
           flipped.set(_dimosCapBuf.subarray((_dimosCapH-1-y)*rowB, (_dimosCapH-y)*rowB), y*rowB);
         }
-        _dimosCapCtx.putImageData(new ImageData(flipped, _dimosCapW, _dimosCapH), 0, 0);
-        const dataUrl = _dimosCapCvs.toDataURL("image/jpeg", 0.75);
-        const idx = dataUrl.indexOf("base64,");
-        return idx !== -1 ? dataUrl.slice(idx + 7) : null;
+        return { data: flipped, width: _dimosCapW, height: _dimosCapH };
       }
 
       // Offscreen depth capture from agent POV (uses main RGBD pipeline targets)
@@ -13017,9 +13031,13 @@ if (dimosMode) {
         agent,
         sensorSources: {
           captureRgb: () => {
-            const b64 = _dimosCaptureRgb();
-            _lastRgbBase64 = b64;
-            return Promise.resolve(b64);
+            const frame = _dimosCaptureRgb();
+            // Keep a JPEG snapshot for eval harness / sidebar display
+            if (frame) {
+              _dimosCapCtx.putImageData(new ImageData(new Uint8ClampedArray(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength), frame.width, frame.height), 0, 0);
+              _lastRgbBase64 = _dimosCapCvs.toDataURL("image/jpeg", 0.75).split("base64,")[1] || null;
+            }
+            return frame;
           },
           captureDepth: () => _dimosCaptureDepth(),
           captureLidar: () => {
@@ -13049,18 +13067,41 @@ if (dimosMode) {
         },
       });
 
-      // Hook: after _publishSensors, capture RGB locally for panels + publish lidar
-      const origPublishSensors = bridge._publishSensors.bind(bridge);
-      bridge._publishSensors = function() {
-        origPublishSensors();
-        // Capture RGB for sidebar display only (not sent over WebSocket)
-        _lastRgbBase64 = _dimosCaptureRgb();
-        _dimosUpdateSidebarPanels(_lastRgbBase64);
-      };
+      // Hook: after _publishSensors — RGB capture disabled for now (GPU stall)
+      // _dimosCaptureRgb() does a full render + readRenderTargetPixels which
+      // stalls the GPU pipeline. Skip it for lidar-only nav testing.
+      // const origPublishSensors = bridge._publishSensors.bind(bridge);
+      // bridge._publishSensors = function() {
+      //   origPublishSensors();
+      //   _lastRgbBase64 = _dimosCaptureRgb();
+      //   _dimosUpdateSidebarPanels(_lastRgbBase64);
+      // };
 
       bridge.connect();
+      bridge.sceneReady = true;
       window.__dimosBridge = bridge;
       window.__dimosAgent = agent;
+
+      // Send Rapier world snapshot to bridge server for server-side lidar.
+      // Wait for sensor WS to open, then send snapshot with DSSN magic prefix.
+      const _waitSensorWs = () => {
+        if (bridge.wsSensors && bridge.wsSensors.readyState === WebSocket.OPEN) {
+          try {
+            const snapshot = rapierWorld.takeSnapshot();
+            const prefixed = new Uint8Array(4 + snapshot.byteLength);
+            prefixed[0] = 0x44; prefixed[1] = 0x53; prefixed[2] = 0x53; prefixed[3] = 0x4E; // "DSSN"
+            prefixed.set(snapshot, 4);
+            bridge.wsSensors.send(prefixed.buffer);
+            bridge._serverLidar = true;
+            console.log(`[DimosBridge] sent Rapier snapshot (${(snapshot.byteLength / 1024).toFixed(0)}KB) — server lidar active`);
+          } catch (e) {
+            console.warn("[DimosBridge] snapshot send failed:", e);
+          }
+        } else {
+          setTimeout(_waitSensorWs, 200);
+        }
+      };
+      _waitSensorWs();
       // Expose yaw for lidar pose sampling (avoids reading Three.js Euler)
       Object.defineProperty(window, '__dimosYaw', { get: () => _dimosYaw });
 
@@ -13075,14 +13116,22 @@ if (dimosMode) {
       // Eval harness disabled — focusing on dimos integration.
       // Re-enable by importing evalHarness.ts when eval workflows are needed.
 
-      // Auto-open Agent Vision panel in dimos mode
+      // Auto-follow dimos agent camera — uses existing agentCameraFollow system
+      // so the main camera shows the agent's POV directly (no GPU readback needed)
       if (!window.__dimosHeadless) {
-        const visionDetails = document.getElementById("agent-vision-details");
-        if (visionDetails) visionDetails.setAttribute("open", "");
+        enableAgentCameraFollow(agent.id);
       }
 
-      // 7. Debug panel (integration diagnostics)
+      // 7a. DimSim version badge
       if (!window.__dimosHeadless) {
+        const badge = document.createElement("div");
+        badge.style.cssText = "position:fixed;bottom:8px;left:8px;z-index:99999;background:rgba(0,0,0,0.75);color:#fff;font:11px/1.4 monospace;padding:6px 10px;border-radius:6px;pointer-events:none;user-select:none;";
+        badge.textContent = "DimSim v0.1.12 — dimos mode";
+        document.body.appendChild(badge);
+      }
+
+      // 7b. Debug panel (integration diagnostics) — hidden for now
+      if (false && !window.__dimosHeadless) {
         const dbg = document.createElement("div");
         dbg.id = "dimos-debug";
         dbg.style.cssText = "position:fixed;bottom:8px;left:8px;z-index:99999;background:rgba(0,0,0,0.88);color:#0f0;font:11px/1.4 monospace;padding:10px 14px;border-radius:8px;max-width:460px;max-height:400px;overflow-y:auto;pointer-events:auto;user-select:text;";
@@ -13098,11 +13147,11 @@ if (dimosMode) {
           _sensorLastTs: Date.now(),
         };
 
-        // Hook sensor publish for FPS counter
-        const _origPubSensors2 = bridge._publishSensors;
-        bridge._publishSensors = function() {
+        // Hook lidar publish for FPS counter
+        const _origPubLidar2 = bridge._publishLidar;
+        bridge._publishLidar = function() {
           _dbgState._sensorCount++;
-          _origPubSensors2.call(bridge);
+          _origPubLidar2.call(bridge);
         };
 
         // Update loop

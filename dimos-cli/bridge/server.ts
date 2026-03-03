@@ -14,6 +14,11 @@ import { LCM } from "../vendor/lcm/lcm.ts";
 import { decodePacket } from "../vendor/lcm/transport.ts";
 import { MAGIC_SHORT, SHORT_HEADER_SIZE } from "../vendor/lcm/types.ts";
 import { serveDir } from "@std/http/file-server";
+import { ServerLidar } from "./lidar.ts";
+import { geometry_msgs } from "@dimos/msgs";
+
+// Magic prefix for Rapier world snapshot (ASCII "DSSN")
+const SNAPSHOT_MAGIC = 0x4453534E;
 
 export interface BridgeServerOptions {
   port: number;
@@ -33,12 +38,43 @@ export async function startBridgeServer(options: BridgeServerOptions) {
 
   let lcm: LCM | null = null;
   const sentSeqs = new Set<number>();
+  let serverLidar: ServerLidar | null = null;
+
+  // -- Server-side lidar init from Rapier snapshot ----------------------------
+  async function initServerLidar(snapshot: Uint8Array): Promise<void> {
+    if (serverLidar) { serverLidar.stop(); serverLidar = null; }
+    try {
+      const RAPIER = await import("@dimforge/rapier3d-compat");
+      await RAPIER.init();
+      const world = RAPIER.World.restoreSnapshot(snapshot);
+      if (!world) { console.error("[bridge] failed to restore Rapier snapshot"); return; }
+
+      // Remove non-fixed bodies (player capsule, AI agents) — server world is static
+      const bodiesToRemove: any[] = [];
+      world.bodies.forEach((body: any) => {
+        if (!body.isFixed()) bodiesToRemove.push(body.handle);
+      });
+      for (const handle of bodiesToRemove) {
+        world.removeRigidBody(world.getRigidBody(handle));
+      }
+      console.log(`[bridge] Rapier snapshot restored (removed ${bodiesToRemove.length} non-fixed bodies)`);
+
+      serverLidar = new ServerLidar(lcm!, world, RAPIER, sentSeqs);
+      serverLidar.start();
+    } catch (e) {
+      console.error("[bridge] server lidar init error:", e);
+    }
+  }
 
   if (!evalOnly) {
     lcm = new LCM();
     await lcm.start();
 
     // LCM → WS: forward external packets to CONTROL clients only
+    // sentSeqs filters echo (packets we published ourselves).
+    // NOTE: no global maxRelaySeq filter — multiple external publishers
+    // (planner, mapper, etc.) have independent seq counters so a single
+    // global max would silently drop packets from slower publishers.
     lcm.subscribePacket((packet: Uint8Array) => {
       if (packet.length < 8) return;
       const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
@@ -77,6 +113,18 @@ export async function startBridgeServer(options: BridgeServerOptions) {
         socket.onmessage = (event: MessageEvent) => {
           if (!(event.data instanceof ArrayBuffer) || !lcm) return;
           const packet = new Uint8Array(event.data);
+
+          // Check for Rapier snapshot (DSSN magic prefix)
+          if (packet.length > 4) {
+            const magic = new DataView(packet.buffer, packet.byteOffset, 4).getUint32(0, false);
+            if (magic === SNAPSHOT_MAGIC) {
+              const snapshot = packet.slice(4);
+              console.log(`[bridge] Rapier snapshot received (${(snapshot.byteLength / 1024).toFixed(0)}KB)`);
+              initServerLidar(snapshot);
+              return;
+            }
+          }
+
           try {
             const decoded = decodePacket(packet);
             if (decoded && decoded.type === "small") {
@@ -87,7 +135,7 @@ export async function startBridgeServer(options: BridgeServerOptions) {
                 console.log(`[bridge] sensor #${_sensorLogN} ${ch} ${(decoded.data.byteLength / 1024).toFixed(0)}KB`);
               }
               sentSeqs.add(lcm.getNextSeq());
-              lcm.publishRaw(decoded.channel, decoded.data);
+              lcm.publishRaw(decoded.channel, decoded.data).catch(() => {});
             }
           } catch { /* ignore */ }
         };
@@ -107,22 +155,8 @@ export async function startBridgeServer(options: BridgeServerOptions) {
         socket.onerror = () => controlClients.delete(socket);
 
         let _odomLogN = 0;
-        let _latestOdom: { channel: string; data: Uint8Array } | null = null;
-
-        // Publish latest odom at 10Hz — always fresh, never queued
-        const _odomTimer = setInterval(async () => {
-          if (_latestOdom && lcm) {
-            const { channel, data } = _latestOdom;
-            _latestOdom = null;
-            try {
-              sentSeqs.add(lcm.getNextSeq());
-              await lcm.publishRaw(channel, data);
-            } catch { /* ignore */ }
-          }
-        }, 100);
 
         socket.onclose = () => {
-          clearInterval(_odomTimer);
           controlClients.delete(socket);
           if (activeControlClient === socket) activeControlClient = null;
           console.log(`[bridge] control WS- (${controlClients.size})`);
@@ -136,17 +170,32 @@ export async function startBridgeServer(options: BridgeServerOptions) {
           try {
             const decoded = decodePacket(packet);
             if (decoded && decoded.type === "small") {
-              // Store latest odom — timer publishes it
               _odomLogN++;
-              const d = decoded.data;
-              _latestOdom = { channel: decoded.channel, data: new Uint8Array(d) };
-              if (d.byteLength >= 32 && (_odomLogN <= 3 || _odomLogN % 100 === 0)) {
-                const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
-                const txSeq = dv.getInt32(8, false);
-                const quatOff = d.byteLength - 32;
-                const qz = dv.getFloat64(quatOff + 16, false), qw = dv.getFloat64(quatOff + 24, false);
-                console.log(`[bridge] odom txSeq=${txSeq} quat=(${qz.toFixed(4)},${qw.toFixed(4)})`);
+
+              // Feed odom to server-side lidar BEFORE async LCM publish
+              if (serverLidar && decoded.channel === "/odom#geometry_msgs.PoseStamped") {
+                try {
+                  const odom = geometry_msgs.PoseStamped.decode(decoded.data);
+                  const p = odom.pose.position;
+                  const q = odom.pose.orientation;
+                  // ROS Z-up → Three.js Y-up: inverse cyclic permutation
+                  // ROS (x,y,z) → Three.js (y,z,x)
+                  serverLidar.updatePose(
+                    p.y, p.z, p.x,  // position
+                    q.y, q.z, q.x, q.w,  // quaternion
+                  );
+                  if (_odomLogN <= 3 || _odomLogN % 200 === 0) {
+                    console.log(`[bridge] odom→lidar #${_odomLogN}: pos=(${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})`);
+                  }
+                } catch (e) {
+                  if (_odomLogN <= 5) console.warn("[bridge] odom decode error:", e);
+                }
               }
+
+              // Relay to LCM (async, non-fatal)
+              const d = decoded.data;
+              sentSeqs.add(lcm.getNextSeq());
+              lcm.publishRaw(decoded.channel, new Uint8Array(d)).catch(() => {});
             }
           } catch { /* ignore */ }
         };

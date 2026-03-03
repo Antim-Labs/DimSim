@@ -1,6 +1,7 @@
 {
   "version": "5",
   "specifiers": {
+    "jsr:@dimos/msgs@~0.1.4": "0.1.4",
     "jsr:@std/cli@^1.0.27": "1.0.27",
     "jsr:@std/encoding@^1.0.10": "1.0.10",
     "jsr:@std/fmt@^1.0.9": "1.0.9",
@@ -13,10 +14,14 @@
     "jsr:@std/path@1": "1.1.4",
     "jsr:@std/path@^1.1.4": "1.1.4",
     "jsr:@std/streams@^1.0.17": "1.0.17",
+    "npm:@dimforge/rapier3d-compat@0.14": "0.14.0",
     "npm:playwright@*": "1.58.2",
     "npm:playwright@^1.58.0": "1.58.2"
   },
   "jsr": {
+    "@dimos/msgs@0.1.4": {
+      "integrity": "564bc30b4bc41a562c296c257a15055283ca0cbd66d0627991ede5295832d0c4"
+    },
     "@std/cli@1.0.27": {
       "integrity": "eba97edd0891871a7410e835dd94b3c260c709cca5983df2689c25a71fbe04de"
     },
@@ -66,6 +71,9 @@
     }
   },
   "npm": {
+    "@dimforge/rapier3d-compat@0.14.0": {
+      "integrity": "sha512-/uHrUzS+CRQ+NQrrJCEDUkhwHlNsAAexbNXgbN9sHY+GwR+SFFAFrxRr8Llf5/AJZzqiLANdQIfJ63Cw4gJVqw=="
+    },
     "fsevents@2.3.2": {
       "integrity": "sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA==",
       "os": ["darwin"],
@@ -88,9 +96,10 @@
   },
   "workspace": {
     "dependencies": [
-      "jsr:@dimos/msgs@0.2",
+      "jsr:@dimos/msgs@~0.1.4",
       "jsr:@std/http@1",
       "jsr:@std/path@1",
+      "npm:@dimforge/rapier3d-compat@0.14",
       "npm:playwright@^1.58.0"
     ]
   }

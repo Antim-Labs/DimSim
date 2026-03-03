@@ -1,9 +1,9 @@
 {
-  "version": "0.1.10",
-  "coreUrl": "https://dimsim-assets.s3.amazonaws.com/v0.1.10/dimsim-core-v0.1.10.tar.gz",
+  "version": "0.1.14",
+  "coreUrl": "https://dimsim-assets.s3.amazonaws.com/v0.1.14/dimsim-core-v0.1.14.tar.gz",
   "scenes": {
     "apt": {
-      "url": "https://dimsim-assets.s3.amazonaws.com/v0.1.10/scene-apt-v0.1.10.tar.gz",
+      "url": "https://dimsim-assets.s3.amazonaws.com/v0.1.14/scene-apt-v0.1.14.tar.gz",
       "description": "Modern apartment interior",
       "size": 71000000
     }
