@@ -56,8 +56,6 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
 
-      # Publish CLI to JSR
+      # Publish CLI to JSR (uses GitHub OIDC — no token needed)
       - name: Publish to JSR
-        run: cd dimos-cli && deno publish --allow-dirty --token "$JSR_TOKEN"
-        env:
-          JSR_TOKEN: ${{ secrets.JSR_TOKEN }}
+        run: cd dimos-cli && deno publish --allow-dirty
