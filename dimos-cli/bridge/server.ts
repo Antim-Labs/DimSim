@@ -25,10 +25,11 @@ export interface BridgeServerOptions {
   distDir: string;
   scene?: string;
   evalOnly?: boolean;
+  headless?: boolean;
 }
 
 export async function startBridgeServer(options: BridgeServerOptions) {
-  const { port, distDir, scene, evalOnly = false } = options;
+  const { port, distDir, scene, evalOnly = false, headless = false } = options;
 
   // Control clients receive LCM→WS relay (cmd_vel from dimos)
   const controlClients = new Set<WebSocket>();
@@ -193,9 +194,8 @@ export async function startBridgeServer(options: BridgeServerOptions) {
               }
 
               // Relay to LCM (async, non-fatal)
-              const d = decoded.data;
               sentSeqs.add(lcm.getNextSeq());
-              lcm.publishRaw(decoded.channel, new Uint8Array(d)).catch(() => {});
+              lcm.publishRaw(decoded.channel, decoded.data).catch(() => {});
             }
           } catch { /* ignore */ }
         };
@@ -207,7 +207,7 @@ export async function startBridgeServer(options: BridgeServerOptions) {
     if (url.pathname === "/" || url.pathname === "/index.html") {
       try {
         let html = await Deno.readTextFile(`${distDir}/index.html`);
-        const inject = `<script>window.__dimosMode=true;window.__dimosScene="${scene || "hotel-lobby"}";</script>`;
+        const inject = `<script>window.__dimosMode=true;window.__dimosScene="${scene || "hotel-lobby"}";${headless ? "window.__dimosHeadless=true;" : ""}</script>`;
         html = html.replace("</head>", `${inject}\n</head>`);
         return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
       } catch {

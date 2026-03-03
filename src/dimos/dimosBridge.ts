@@ -27,7 +27,11 @@ const CH_DEPTH = "/depth_image#sensor_msgs.Image";
 const CH_LIDAR = "/lidar#sensor_msgs.PointCloud2";
 
 // -- Default publish rates (ms) ----------------------------------------------
-const DEFAULT_RATES: PublishRates = { odom: 50, lidar: 200, images: 500 }; // 20 Hz odom, 5 Hz lidar, 2 Hz images
+const DEFAULT_RATES: PublishRates = { odom: 20, lidar: 200, images: 500 }; // 50 Hz odom, 5 Hz lidar, 2 Hz images
+const CMD_VEL_TIMEOUT_MS = 500;
+const SENSOR_BACKPRESSURE_BYTES = 8 * 1024 * 1024;
+const BRIDGE_DEBUG = false;
+const LIDAR_POINT_STEP = 16;
 
 // -- Types --------------------------------------------------------------------
 
@@ -95,6 +99,10 @@ export class DimosBridge {
   _cmdVel: { linX: number; linY: number; linZ: number; angX: number; angY: number; angZ: number } | null;
   _cmdVelStamp: number;
   _serverLidar: boolean;
+  _lidarBuf: ArrayBuffer;
+  _lidarView: DataView;
+  _lidarCapacityPoints: number;
+  _pc2Fields: any[];
 
   constructor({ wsUrl, agent, sensorSources, rates, frameTransform }: DimosBridgeOptions) {
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -112,6 +120,15 @@ export class DimosBridge {
     this._cmdVel = null;
     this._cmdVelStamp = 0;
     this._serverLidar = false;
+    this._lidarBuf = new ArrayBuffer(0);
+    this._lidarView = new DataView(this._lidarBuf);
+    this._lidarCapacityPoints = 0;
+    this._pc2Fields = [
+      new sensor_msgs.PointField({ name: "x", offset: 0, datatype: 7, count: 1 }),
+      new sensor_msgs.PointField({ name: "y", offset: 4, datatype: 7, count: 1 }),
+      new sensor_msgs.PointField({ name: "z", offset: 8, datatype: 7, count: 1 }),
+      new sensor_msgs.PointField({ name: "intensity", offset: 12, datatype: 7, count: 1 }),
+    ];
   }
 
   connect(): void {
@@ -192,7 +209,7 @@ export class DimosBridge {
 
   /** Get current velocity, auto-zeroing after 1500ms timeout (safety stop). */
   getCmdVel(): { linX: number; linY: number; linZ: number; angX: number; angY: number; angZ: number } {
-    if (!this._cmdVel || Date.now() - this._cmdVelStamp > 1500) {
+    if (!this._cmdVel || Date.now() - this._cmdVelStamp > CMD_VEL_TIMEOUT_MS) {
       return { linX: 0, linY: 0, linZ: 0, angX: 0, angY: 0, angZ: 0 };
     }
     return this._cmdVel;
@@ -204,7 +221,10 @@ export class DimosBridge {
 
   _startPublishing(): void {
     // No lidar timer — server-side lidar handles it via LCM directly.
-    // No images timer — camera stream disabled for now.
+    // Images at 2 Hz (GPU readback is expensive, keep rate low)
+    if (this.rates.images > 0) {
+      this._timers["images"] = setInterval(() => this._publishImages(), this.rates.images);
+    }
   }
 
   _makeHeader(frameId: string): any {
@@ -216,14 +236,19 @@ export class DimosBridge {
   }
 
   _publishOdom(): void {
+    if (!this._isControlSocketOpen()) return;
     this._publishOdomSync(this._makeHeader("world"));
   }
 
   _publishLidar(): void {
+    if (!this._isSensorSocketOpen()) return;
     this._publishLidarSync(this._makeHeader("world"));
   }
 
   _publishImages(): void {
+    if (!this._isSensorSocketOpen()) return;
+    // When outbound queue is saturated, skip sensor capture/encode for this tick.
+    if (this.wsSensors && this.wsSensors.bufferedAmount > SENSOR_BACKPRESSURE_BYTES) return;
     const camHeader = this._makeHeader("camera_optical");
     this._publishRgbSync(camHeader);
     this._publishDepthSync(camHeader);
@@ -259,7 +284,7 @@ export class DimosBridge {
       odomMsg.header = header;
       odomMsg.pose = p;
 
-      if (this._odomDbgN <= 3 || this._odomDbgN % 100 === 0) {
+      if (BRIDGE_DEBUG && (this._odomDbgN <= 3 || this._odomDbgN % 100 === 0)) {
         console.log(`[odom TX seq=${this._odomDbgN}] qz=${rosQz.toFixed(4)} qw=${rosQw.toFixed(4)}`);
       }
 
@@ -279,14 +304,17 @@ export class DimosBridge {
 
   /** Send on the control WebSocket (odom, small real-time data) */
   _sendControl(channel: string, msg: any): void {
-    if (!this.wsControl || this.wsControl.readyState !== WebSocket.OPEN) return;
-    this.wsControl.send(encodePacket(channel, msg));
+    const ws = this.wsControl;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(encodePacket(channel, msg));
   }
 
   /** Send on the sensor WebSocket (images, lidar — large data) */
   _sendSensor(channel: string, msg: any): void {
-    if (!this.wsSensors || this.wsSensors.readyState !== WebSocket.OPEN) return;
-    this.wsSensors.send(encodePacket(channel, msg));
+    const ws = this.wsSensors;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (ws.bufferedAmount > SENSOR_BACKPRESSURE_BYTES) return;
+    ws.send(encodePacket(channel, msg));
   }
 
   /** Legacy _send — routes to appropriate socket based on channel */
@@ -302,6 +330,7 @@ export class DimosBridge {
 
   _publishRgbSync(header: any): void {
     try {
+      if (!this._isSensorSocketOpen()) return;
       const frame = this.sensors.captureRgb();
       if (!frame) return;
 
@@ -324,6 +353,7 @@ export class DimosBridge {
 
   _publishDepthSync(header: any): void {
     try {
+      if (!this._isSensorSocketOpen()) return;
       const frame = this.sensors.captureDepth();
       if (!frame) return;
 
@@ -349,9 +379,11 @@ export class DimosBridge {
   _lidarDbgN = 0;
   _publishLidarSync(header: any): void {
     try {
+      if (!this._isSensorSocketOpen()) return;
+      if (this.wsSensors && this.wsSensors.bufferedAmount > SENSOR_BACKPRESSURE_BYTES) return;
       const frame = this.sensors.captureLidar();
       this._lidarDbgN++;
-      if (this._lidarDbgN <= 3 || this._lidarDbgN % 100 === 0) {
+      if (BRIDGE_DEBUG && (this._lidarDbgN <= 3 || this._lidarDbgN % 100 === 0)) {
         console.log(`[DimosBridge] lidar #${this._lidarDbgN}: ${frame ? frame.numPoints : 'null'} pts, sensorWS=${this.wsSensors?.readyState}`);
       }
       if (!frame) return;
@@ -359,9 +391,9 @@ export class DimosBridge {
       const numPoints = frame.numPoints || 0;
       if (numPoints === 0) return;
 
-      const pointStep = 16;
-      const buf = new ArrayBuffer(numPoints * pointStep);
-      const view = new DataView(buf);
+      this._ensureLidarCapacity(numPoints);
+      const pointStep = LIDAR_POINT_STEP;
+      const view = this._lidarView;
       const pts = frame.points;
       const intensity = frame.intensity;
 
@@ -380,18 +412,13 @@ export class DimosBridge {
         header,
         height: 1,
         width: numPoints,
-        fields_length: 4,
-        fields: [
-          new sensor_msgs.PointField({ name: "x", offset: 0, datatype: 7, count: 1 }),
-          new sensor_msgs.PointField({ name: "y", offset: 4, datatype: 7, count: 1 }),
-          new sensor_msgs.PointField({ name: "z", offset: 8, datatype: 7, count: 1 }),
-          new sensor_msgs.PointField({ name: "intensity", offset: 12, datatype: 7, count: 1 }),
-        ],
+        fields_length: this._pc2Fields.length,
+        fields: this._pc2Fields,
         is_bigendian: 0,
         point_step: pointStep,
         row_step: numPoints * pointStep,
         data_length: numPoints * pointStep,
-        data: new Uint8Array(buf),
+        data: new Uint8Array(this._lidarBuf, 0, numPoints * pointStep),
         is_dense: 1,
       }));
     } catch (e) {
@@ -406,5 +433,19 @@ export class DimosBridge {
     this.wsControl = null;
     this.wsSensors = null;
   }
-}
 
+  _isControlSocketOpen(): boolean {
+    return !!this.wsControl && this.wsControl.readyState === WebSocket.OPEN;
+  }
+
+  _isSensorSocketOpen(): boolean {
+    return !!this.wsSensors && this.wsSensors.readyState === WebSocket.OPEN;
+  }
+
+  _ensureLidarCapacity(numPoints: number): void {
+    if (numPoints <= this._lidarCapacityPoints) return;
+    this._lidarCapacityPoints = numPoints;
+    this._lidarBuf = new ArrayBuffer(numPoints * LIDAR_POINT_STEP);
+    this._lidarView = new DataView(this._lidarBuf);
+  }
+}

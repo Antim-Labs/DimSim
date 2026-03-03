@@ -173,7 +173,7 @@ async function main() {
     console.log(`[dimsim] Serving from: ${distDir}`);
 
     // LCM bridge is always active in dev mode (unlike eval --headless which disables it)
-    startBridgeServer({ port, distDir, scene });
+    startBridgeServer({ port, distDir, scene, headless });
 
     if (headless) {
       console.log("[dimsim] Launching headless browser...");

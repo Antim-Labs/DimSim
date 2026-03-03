@@ -51,6 +51,10 @@ const GPU_ARGS = [
   "--use-angle=metal",
   "--in-process-gpu",
   "--disable-gpu-sandbox",
+  // Prevent Chrome from throttling timers in headless/background mode
+  "--disable-background-timer-throttling",
+  "--disable-backgrounding-occluded-windows",
+  "--disable-renderer-backgrounding",
 ];
 
 const CPU_ARGS = [
@@ -64,21 +68,28 @@ const CPU_ARGS = [
   "--use-angle=swiftshader",
   "--enable-unsafe-swiftshader",
   "--disable-gpu",
+  // Prevent Chrome from throttling timers in headless/background mode
+  "--disable-background-timer-throttling",
+  "--disable-backgrounding-occluded-windows",
+  "--disable-renderer-backgrounding",
 ];
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 /** Filter noisy browser console output — only forward errors, warnings, and eval/bridge logs. */
 function hookPageConsole(page: Page, tag: string): void {
+  const verbose = Deno.env.get("DIMSIM_VERBOSE") === "1";
   page.on("console", (msg) => {
     const type = msg.type();
     const text = msg.text();
-    if (text.includes("Texture marked for update") || text.includes("Failed to load resource") ||
-        text.includes("GPU stall due to ReadPixels") || text.includes("Automatic fallback to software WebGL") ||
-        text.includes("GroupMarkerNotSet")) return;
+    if (!verbose) {
+      if (text.includes("Texture marked for update") || text.includes("Failed to load resource") ||
+          text.includes("GPU stall due to ReadPixels") || text.includes("Automatic fallback to software WebGL") ||
+          text.includes("GroupMarkerNotSet")) return;
+    }
     if (type === "error") console.error(`${tag} ${text}`);
     else if (type === "warning") console.warn(`${tag} ${text}`);
-    else if (text.startsWith("[eval]") || text.startsWith("[DimosBridge]")) {
+    else if (verbose || text.startsWith("[eval]") || text.startsWith("[DimosBridge]")) {
       console.log(`${tag} ${text}`);
     }
   });
@@ -101,6 +112,7 @@ export async function launchHeadless(options: LaunchOptions): Promise<HeadlessIn
 
   const browser = await chromium.launch({
     headless: false,  // --headless=new passed via args (Playwright's built-in headless uses old mode)
+    channel: "chrome", // Use system Chrome — Playwright bundled Chromium has broken WebGL on macOS
     args,
   });
 
@@ -135,7 +147,7 @@ export async function launchMultiPage(options: MultiPageOptions): Promise<MultiP
 
   console.log(`[headless] Multi-page: ${numPages} pages, render=${render}`);
 
-  const browser = await chromium.launch({ headless: false, args });
+  const browser = await chromium.launch({ headless: false, channel: "chrome", args });
 
   const pages: Page[] = [];
   const channels: string[] = [];
