@@ -30,3 +30,25 @@ jobs:
       # CLI type-check (entrypoints only, not tests)
       - name: Type-check CLI
         run: cd dimos-cli && deno check cli.ts mod.ts setup.ts
+
+      # Version consistency: deno.json version must match scenes.json version
+      - name: Check version consistency
+        run: |
+          DENO_VER=$(jq -r .version dimos-cli/deno.json)
+          S3_VER=$(jq -r .version scenes.json)
+          echo "deno.json: $DENO_VER"
+          echo "scenes.json: $S3_VER"
+          if [ "$DENO_VER" != "$S3_VER" ]; then
+            echo "::error::Version mismatch! deno.json=$DENO_VER scenes.json=$S3_VER"
+            exit 1
+          fi
+          # Check S3 URLs contain the correct version
+          CORE_URL=$(jq -r .coreUrl scenes.json)
+          SCENE_URL=$(jq -r '.scenes.apt.url' scenes.json)
+          if [[ "$CORE_URL" != *"$S3_VER"* ]] || [[ "$SCENE_URL" != *"$S3_VER"* ]]; then
+            echo "::error::S3 URLs don't match version $S3_VER"
+            echo "  coreUrl: $CORE_URL"
+            echo "  apt url: $SCENE_URL"
+            exit 1
+          fi
+          echo "All versions consistent: v$DENO_VER"
