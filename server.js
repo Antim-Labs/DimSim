@@ -9,9 +9,9 @@ import { dirname, join } from "path";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// ── API Keys ────────────────────────────────────────────────────────────────
-const OPENAI_API_KEY = "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";
-const GEMINI_API_KEY = "AIzaSyDnG_fSjtDFeqlP9t-Jj1_PfMjko5uCuL0";
+// ── API Keys (from environment variables) ───────────────────────────────────
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/";
 const VLM_MIN_INTERVAL_MS = 900;
 const VLM_MAX_RETRIES = 4;
