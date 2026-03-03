@@ -87,6 +87,8 @@ export async function startBridgeServer(options: BridgeServerOptions) {
         sentSeqs.delete(seq);
         return;
       }
+      // Prevent unbounded growth if echoes are lost
+      if (sentSeqs.size > 1000) sentSeqs.clear();
 
       const copy = packet.slice();
       const client = activeControlClient;

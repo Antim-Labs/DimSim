@@ -13,12 +13,12 @@ import {
 import type { LCM } from "../vendor/lcm/lcm.ts";
 
 // -- Lidar constants (must match engine.js) -----------------------------------
-const NUM_POINTS = 20000;
+const NUM_POINTS = 10000;
 const MIN_RANGE = 0.1;
 const MAX_RANGE = 3;
 const V_MIN_RAD = (-30 * Math.PI) / 180;
 const V_MAX_RAD = (15 * Math.PI) / 180;
-const RATE_MS = 100; // 10 Hz
+const RATE_MS = 200; // 5 Hz
 
 const CH_LIDAR = "/lidar#sensor_msgs.PointCloud2";
 
@@ -102,11 +102,14 @@ export class ServerLidar {
   private qw = 1;
   private hasPose = false;
 
+  private ray: any; // Reusable Ray object (avoids 20k allocations per scan)
+
   constructor(lcm: LCM, rapierWorld: any, RAPIER: any, sentSeqs: Set<number>) {
     this.lcm = lcm;
     this.world = rapierWorld;
     this.RAPIER = RAPIER;
     this.sentSeqs = sentSeqs;
+    this.ray = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 });
     // Step once with zero dt to initialize the query pipeline after snapshot restore.
     // queryPipeline.update() crashes on restored worlds (WASM type mismatch),
     // but world.step() internally updates the pipeline correctly.
@@ -178,10 +181,12 @@ export class ServerLidar {
         if (len < 1e-8) continue;
         const nx = dx / len, ny = dy / len, nz = dz / len;
 
-        const ray = new RAPIER.Ray({ x: ox, y: oy, z: oz }, { x: nx, y: ny, z: nz });
+        // Reuse ray object — avoids 20k allocations per scan
+        this.ray.origin.x = ox; this.ray.origin.y = oy; this.ray.origin.z = oz;
+        this.ray.dir.x = nx; this.ray.dir.y = ny; this.ray.dir.z = nz;
         // Use world.castRay (not queryPipeline.castRayAndGetNormal) —
         // the pipeline API crashes on restored snapshot worlds.
-        const hit = world.castRay(ray, MAX_RANGE, false);
+        const hit = world.castRay(this.ray, MAX_RANGE, false);
 
         if (!hit) continue;
         const toi = hit.timeOfImpact ?? 0;

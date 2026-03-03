@@ -338,9 +338,9 @@ export class DimosBridge {
         header,
         height: frame.height,
         width: frame.width,
-        encoding: "rgba8",
+        encoding: "jpeg",
         is_bigendian: 0,
-        step: frame.width * 4,
+        step: 0,  // not applicable for compressed format
         data_length: frame.data.length,
         data: frame.data,
       }));

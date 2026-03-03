@@ -1516,7 +1516,7 @@ function updateRgbdPcOverlayCloud(force = false) {
 // i.e. p_world = T_w_l * p_lidar
 // Livox Mid-360 sensor model (non-repetitive Fibonacci scan pattern)
 const LIDAR_SCAN_DURATION_S = 0.1; // 10 Hz scan rate
-const LIDAR_NUM_POINTS = 20000;    // points per scan (dense enough for consistent column coverage)
+const LIDAR_NUM_POINTS = 10000;    // points per scan
 const LIDAR_MAX_POINTS = LIDAR_NUM_POINTS;
 const LIDAR_MIN_RANGE_M = 0.1;     // Mid-360: 0.1m min
 const LIDAR_MAX_RANGE_M = 5;
@@ -13032,12 +13032,17 @@ if (dimosMode) {
         sensorSources: {
           captureRgb: () => {
             const frame = _dimosCaptureRgb();
-            // Keep a JPEG snapshot for eval harness / sidebar display
-            if (frame) {
-              _dimosCapCtx.putImageData(new ImageData(new Uint8ClampedArray(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength), frame.width, frame.height), 0, 0);
-              _lastRgbBase64 = _dimosCapCvs.toDataURL("image/jpeg", 0.75).split("base64,")[1] || null;
-            }
-            return frame;
+            if (!frame) return null;
+            // Render to canvas → JPEG (used for both LCM publish and eval/sidebar)
+            _dimosCapCtx.putImageData(new ImageData(new Uint8ClampedArray(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength), frame.width, frame.height), 0, 0);
+            const dataUrl = _dimosCapCvs.toDataURL("image/jpeg", 0.75);
+            _lastRgbBase64 = dataUrl.split("base64,")[1] || null;
+            if (!_lastRgbBase64) return null;
+            // Decode base64 → Uint8Array for JPEG LCM transport
+            const bin = atob(_lastRgbBase64);
+            const jpegBytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) jpegBytes[i] = bin.charCodeAt(i);
+            return { data: jpegBytes, width: frame.width, height: frame.height };
           },
           captureDepth: () => _dimosCaptureDepth(),
           captureLidar: () => {
