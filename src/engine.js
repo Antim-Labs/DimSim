@@ -8,25 +8,17 @@ import { buildPrompt as buildSimVlmPrompt } from "./ai/sim/vlmPrompt.js";
 import { MODEL_CONFIG } from "./ai/modelConfig.js";
 import { requestVlmDecision } from "./ai/vlmClient.js";
 import { captureAgentPovBase64, processPendingCaptures, hasPendingCapture } from "./ai/visionCapture.js";
-import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 
-const IS_SIM_ONLY_PROFILE = true;
 const ACTIVE_VLM_ACTIONS = SIM_VLM_ACTIONS;
 const ACTIVE_VLM_DEFAULTS = SIM_VLM_DEFAULTS;
 const buildActiveVlmPrompt = () => buildSimVlmPrompt({ actions: ACTIVE_VLM_ACTIONS });
-const resolveActiveVlmModel = () => (IS_SIM_ONLY_PROFILE ? MODEL_CONFIG.simMode : MODEL_CONFIG.editorMode);
+const resolveActiveVlmModel = () => MODEL_CONFIG.simMode;
 
 let threeRendererRef = null;
 let threeSceneRef = null;
-// Splat/Spark stubs — variables kept so guarded references don't crash.
-// SparkJS has been removed; these are always null.
-let sparkRendererMesh = null;
-let sparkNeedsUpdate = false;
-let splatMesh = null;
-let isLoadedSplat = false;
 let RAPIER = null;
 let _rapierInitPromise = null;
 let rapierWorld = null;
@@ -35,7 +27,6 @@ let playerBody = null;
 let playerCollider = null;
 let flyMode = true;
 let ghostMode = false;
-let voxelGrid = null; // { NX, NY, NZ, voxel, min, occ }
 let characterController = null;
 let _rapierStepFaultCount = 0;
 let walkVerticalVel = 0;
@@ -51,236 +42,14 @@ const PLAYER_EYE_HEIGHT = PLAYER_HALF_HEIGHT + PLAYER_RADIUS + 0.2; // camera ab
 const LIDAR_MOUNT_HEIGHT = 0.35; // Go2 lidar mount height above ground
 
 const canvas = document.getElementById("c");
-const fileInput = document.getElementById("file-input");
 const statusEl = document.getElementById("status");
 const resetBtn = document.getElementById("reset");
-const modeEditBtn = null;
-const modeSimBtn = null;
+const assetsListEl = document.getElementById("assets-list"); // null in sim-only
 const overlayEl = document.getElementById("overlay");
 const simPanelCollapseBtn = document.getElementById("sim-panel-collapse");
 const simPanelOpenBtn = document.getElementById("sim-panel-open");
-const leftPanelCollapseBtn = document.getElementById("left-panel-collapse");
-const leftPanelOpenBtn = document.getElementById("left-panel-open");
 const statusSimEl = document.getElementById("status-sim");
-const tagPlaceBtn = document.getElementById("tag-place");
 const spawnAiBtn = document.getElementById("spawn-ai");
-const assetGlbInputEl = document.getElementById("asset-glb-input");
-const workspaceTabSceneBtn = document.getElementById("workspace-tab-scene");
-const workspaceTabAssetBuilderBtn = document.getElementById("workspace-tab-asset-builder");
-const editorSimLightPreviewBtn = document.getElementById("editor-sim-light-preview-btn");
-
-// Removed old collision quality/mode elements (simplified UI)
-const tagSelectedEl = document.getElementById("tag-selected");
-const tagFormEl = document.getElementById("tag-form");
-const tagTitleEl = document.getElementById("tag-title");
-const tagNotesEl = document.getElementById("tag-notes");
-const tagRadiusEl = document.getElementById("tag-radius");
-const tagRadiusValueEl = document.getElementById("tag-radius-value");
-const tagSaveBtn = document.getElementById("tag-save");
-const tagCancelBtn = document.getElementById("tag-cancel");
-const tagDeleteBtn = document.getElementById("tag-delete");
-const tagsListEl = document.getElementById("tags-list");
-const tagsExportBtn = document.getElementById("tags-export");
-const tagsImportEl = document.getElementById("tags-import");
-const assetsListEl = document.getElementById("assets-list");
-const modalEl = document.getElementById("modal");
-const assetTitleEl = document.getElementById("asset-title");
-const assetNotesEl = document.getElementById("asset-notes");
-const assetPickableEl = document.getElementById("asset-pickable");
-const assetStatesContainerEl = document.getElementById("asset-states-container");
-const assetAddStateBtn = document.getElementById("asset-add-state");
-const assetCreateBtn = document.getElementById("asset-create");
-const assetCancelBtn = document.getElementById("asset-cancel");
-
-// Primitive / Light editor elements
-const shapeDropdownToggle = document.getElementById("shape-dropdown-toggle");
-const shapeDropdownMenu = document.getElementById("shape-dropdown-menu");
-const lightAddBtn = document.getElementById("light-add-btn");
-const primitivesListEl = document.getElementById("primitives-list");
-const primPropsEl = document.getElementById("prim-props");
-const primNameEl = document.getElementById("prim-name");
-const primDimsContainerEl = document.getElementById("prim-dims-container");
-const primColorEl = document.getElementById("prim-color");
-const primRoughnessEl = document.getElementById("prim-roughness");
-const primRoughnessValEl = document.getElementById("prim-roughness-val");
-const primPresetPlasticBtn = document.getElementById("prim-preset-plastic");
-const primPresetCeramicBtn = document.getElementById("prim-preset-ceramic");
-const primPresetRubberBtn = document.getElementById("prim-preset-rubber");
-const primPresetFabricBtn = document.getElementById("prim-preset-fabric");
-const primPresetVelvetBtn = document.getElementById("prim-preset-velvet");
-const primPresetCushionBtn = document.getElementById("prim-preset-cushion");
-const primPresetLeafBtn = document.getElementById("prim-preset-leaf");
-const primPresetWaterBtn = document.getElementById("prim-preset-water");
-const primPresetGlassBtn = document.getElementById("prim-preset-glass");
-const primPresetMirrorBtn = document.getElementById("prim-preset-mirror");
-const primPresetMetalBtn = document.getElementById("prim-preset-metal");
-const primPresetConcreteBtn = document.getElementById("prim-preset-concrete");
-const primPresetEmissiveBtn = document.getElementById("prim-preset-emissive");
-const primMetalnessEl = document.getElementById("prim-metalness");
-const primMetalnessValEl = document.getElementById("prim-metalness-val");
-const primHardnessEl = document.getElementById("prim-hardness");
-const primHardnessValEl = document.getElementById("prim-hardness-val");
-const primFluffinessEl = document.getElementById("prim-fluffiness");
-const primFluffinessValEl = document.getElementById("prim-fluffiness-val");
-const primSpecularIntensityEl = document.getElementById("prim-specular-intensity");
-const primSpecularIntensityValEl = document.getElementById("prim-specular-intensity-val");
-const primSpecularColorEl = document.getElementById("prim-specular-color");
-const primEnvIntensityEl = document.getElementById("prim-env-intensity");
-const primEnvIntensityValEl = document.getElementById("prim-env-intensity-val");
-const primOpacityEl = document.getElementById("prim-opacity");
-const primOpacityValEl = document.getElementById("prim-opacity-val");
-const primTransmissionEl = document.getElementById("prim-transmission");
-const primTransmissionValEl = document.getElementById("prim-transmission-val");
-const primIorEl = document.getElementById("prim-ior");
-const primIorValEl = document.getElementById("prim-ior-val");
-const primThicknessEl = document.getElementById("prim-thickness");
-const primThicknessValEl = document.getElementById("prim-thickness-val");
-const primAttenuationColorEl = document.getElementById("prim-attenuation-color");
-const primAttenuationDistanceEl = document.getElementById("prim-attenuation-distance");
-const primAttenuationDistanceValEl = document.getElementById("prim-attenuation-distance-val");
-const primIridescenceEl = document.getElementById("prim-iridescence");
-const primIridescenceValEl = document.getElementById("prim-iridescence-val");
-const primEmissiveColorEl = document.getElementById("prim-emissive-color");
-const primEmissiveIntensityEl = document.getElementById("prim-emissive-intensity");
-const primEmissiveIntensityValEl = document.getElementById("prim-emissive-intensity-val");
-const primClearcoatEl = document.getElementById("prim-clearcoat");
-const primClearcoatValEl = document.getElementById("prim-clearcoat-val");
-const primClearcoatRoughnessEl = document.getElementById("prim-clearcoat-roughness");
-const primClearcoatRoughnessValEl = document.getElementById("prim-clearcoat-roughness-val");
-const primAlphaCutoffEl = document.getElementById("prim-alpha-cutoff");
-const primAlphaCutoffValEl = document.getElementById("prim-alpha-cutoff-val");
-const primTextureSoftnessEl = document.getElementById("prim-texture-softness");
-const primTextureSoftnessValEl = document.getElementById("prim-texture-softness-val");
-const primTextureHardnessEl = document.getElementById("prim-texture-hardness");
-const primTextureHardnessValEl = document.getElementById("prim-texture-hardness-val");
-const primUvRepeatXEl = document.getElementById("prim-uv-repeat-x");
-const primUvRepeatXValEl = document.getElementById("prim-uv-repeat-x-val");
-const primUvRepeatYEl = document.getElementById("prim-uv-repeat-y");
-const primUvRepeatYValEl = document.getElementById("prim-uv-repeat-y-val");
-const primUvOffsetXEl = document.getElementById("prim-uv-offset-x");
-const primUvOffsetXValEl = document.getElementById("prim-uv-offset-x-val");
-const primUvOffsetYEl = document.getElementById("prim-uv-offset-y");
-const primUvOffsetYValEl = document.getElementById("prim-uv-offset-y-val");
-const primUvRotationEl = document.getElementById("prim-uv-rotation");
-const primUvRotationValEl = document.getElementById("prim-uv-rotation-val");
-const primDoubleSidedEl = document.getElementById("prim-double-sided");
-const primFlatShadingEl = document.getElementById("prim-flat-shading");
-const primWireframeEl = document.getElementById("prim-wireframe");
-const primTextureEl = document.getElementById("prim-texture");
-const primTextureLabelEl = document.getElementById("prim-texture-label");
-const primTextureClearBtn = document.getElementById("prim-texture-clear");
-const primPhysicsEl = document.getElementById("prim-physics");
-const primCastShadowEl = document.getElementById("prim-cast-shadow");
-const primReceiveShadowEl = document.getElementById("prim-receive-shadow");
-const primNotesEl = document.getElementById("prim-notes");
-const primTagsInputEl = document.getElementById("prim-tags-input");
-const primStateEl = document.getElementById("prim-state");
-const primMetaListEl = document.getElementById("prim-meta-list");
-const primMetaAddBtn = document.getElementById("prim-meta-add");
-const primDuplicateBtn = document.getElementById("prim-duplicate");
-const primDeleteBtn = document.getElementById("prim-delete");
-const primSubtractSourceEl = document.getElementById("prim-subtract-source");
-const primSubtractDeleteSourceEl = document.getElementById("prim-subtract-delete-source");
-const primSubtractApplyBtn = document.getElementById("prim-subtract-apply");
-const primSubtractClearBtn = document.getElementById("prim-subtract-clear");
-const primSubtractCountEl = document.getElementById("prim-subtract-count");
-const lightsListEl = document.getElementById("lights-list");
-const lightPropsEl = document.getElementById("light-props");
-const lightNameEl = document.getElementById("light-name");
-const lightTypeEl = document.getElementById("light-type");
-const lightColorEl = document.getElementById("light-color");
-const lightIntensityEl = document.getElementById("light-intensity");
-const lightIntensityValEl = document.getElementById("light-intensity-val");
-const lightDistanceEl = document.getElementById("light-distance");
-const lightDistanceValEl = document.getElementById("light-distance-val");
-const lightDistanceGroupEl = document.getElementById("light-distance-group");
-const lightSpotGroupEl = document.getElementById("light-spot-group");
-const lightAngleEl = document.getElementById("light-angle");
-const lightAngleValEl = document.getElementById("light-angle-val");
-const lightPenumbraEl = document.getElementById("light-penumbra");
-const lightPenumbraValEl = document.getElementById("light-penumbra-val");
-const lightTargetXEl = document.getElementById("light-target-x");
-const lightTargetYEl = document.getElementById("light-target-y");
-const lightTargetZEl = document.getElementById("light-target-z");
-const lightCastShadowEl = document.getElementById("light-cast-shadow");
-const lightDeleteBtn = document.getElementById("light-delete");
-
-// Scene light elements
-const sceneLightsListEl = document.getElementById("scene-lights-list");
-const sceneLightPropsEl = document.getElementById("scene-light-props");
-const slTitleEl = document.getElementById("sl-title");
-const slColorEl = document.getElementById("sl-color");
-const slIntensityEl = document.getElementById("sl-intensity");
-const slIntensityValEl = document.getElementById("sl-intensity-val");
-const slGroundRowEl = document.getElementById("sl-ground-row");
-const slGroundColorEl = document.getElementById("sl-ground-color");
-const slDistanceRowEl = document.getElementById("sl-distance-row");
-const slDistanceEl = document.getElementById("sl-distance");
-const slDistanceValEl = document.getElementById("sl-distance-val");
-const slShadowRowEl = document.getElementById("sl-shadow-row");
-const slShadowEl = document.getElementById("sl-shadow");
-const slEnabledEl = document.getElementById("sl-enabled");
-const slSkyControlsEl = document.getElementById("sl-sky-controls");
-const slSkyTopColorEl = document.getElementById("sl-sky-top-color");
-const slSkyHorizonColorEl = document.getElementById("sl-sky-horizon-color");
-const slSkyBottomColorEl = document.getElementById("sl-sky-bottom-color");
-const slSkyBrightnessEl = document.getElementById("sl-sky-brightness");
-const slSkyBrightnessValEl = document.getElementById("sl-sky-brightness-val");
-const slSkySoftnessEl = document.getElementById("sl-sky-softness");
-const slSkySoftnessValEl = document.getElementById("sl-sky-softness-val");
-const slSkySunStrengthEl = document.getElementById("sl-sky-sun-strength");
-const slSkySunStrengthValEl = document.getElementById("sl-sky-sun-strength-val");
-const slSkySunHeightEl = document.getElementById("sl-sky-sun-height");
-const slSkySunHeightValEl = document.getElementById("sl-sky-sun-height-val");
-
-// Details panel + Transform XYZ elements
-const detailsPanelEl = document.getElementById("details-panel");
-const detailsTitleEl = document.getElementById("details-title");
-const assetDetailsEl = document.getElementById("asset-details");
-const xformPxEl = document.getElementById("xform-px");
-const xformPyEl = document.getElementById("xform-py");
-const xformPzEl = document.getElementById("xform-pz");
-const xformRxEl = document.getElementById("xform-rx");
-const xformRyEl = document.getElementById("xform-ry");
-const xformRzEl = document.getElementById("xform-rz");
-const xformSxEl = document.getElementById("xform-sx");
-const xformSyEl = document.getElementById("xform-sy");
-const xformSzEl = document.getElementById("xform-sz");
-const olTagsCountEl = document.getElementById("ol-tags-count");
-const olAssetsCountEl = document.getElementById("ol-assets-count");
-const olPrimsCountEl = document.getElementById("ol-prims-count");
-const olLightsCountEl = document.getElementById("ol-lights-count");
-
-const assetInteractActionEl = document.getElementById("asset-interact-action");
-const assetInteractSelectedBtn = document.getElementById("asset-interact-selected");
-const assetEditStatesSelectedBtn = document.getElementById("asset-edit-states-selected");
-const assetDuplicateSelectedBtn = document.getElementById("asset-duplicate-selected");
-const assetCastShadowEl = document.getElementById("asset-cast-shadow");
-const assetReceiveShadowEl = document.getElementById("asset-receive-shadow");
-const assetSelectedPickableEl = document.getElementById("asset-selected-pickable");
-const assetBumpableEl = document.getElementById("asset-bumpable");
-const assetBumpControlsEl = document.getElementById("asset-bump-controls");
-const assetBumpResponseEl = document.getElementById("asset-bump-response");
-const assetBumpResponseValEl = document.getElementById("asset-bump-response-val");
-const assetBumpDampingEl = document.getElementById("asset-bump-damping");
-const assetBumpDampingValEl = document.getElementById("asset-bump-damping-val");
-const blobShadowControlsEl = document.getElementById("blob-shadow-controls");
-const blobShadowOpacityEl = document.getElementById("blob-shadow-opacity");
-const blobShadowOpacityValEl = document.getElementById("blob-shadow-opacity-val");
-const blobShadowScaleEl = document.getElementById("blob-shadow-scale");
-const blobShadowScaleValEl = document.getElementById("blob-shadow-scale-val");
-const blobShadowStretchEl = document.getElementById("blob-shadow-stretch");
-const blobShadowStretchValEl = document.getElementById("blob-shadow-stretch-val");
-const blobShadowRotEl = document.getElementById("blob-shadow-rot");
-const blobShadowRotValEl = document.getElementById("blob-shadow-rot-val");
-const blobShadowOxEl = document.getElementById("blob-shadow-ox");
-const blobShadowOyEl = document.getElementById("blob-shadow-oy");
-const blobShadowOzEl = document.getElementById("blob-shadow-oz");
-const assetDeleteSelectedBtn = document.getElementById("asset-delete-selected");
-const assetToolMoveBtn = document.getElementById("asset-tool-move");
-const assetToolRotateBtn = document.getElementById("asset-tool-rotate");
-const assetToolScaleBtn = document.getElementById("asset-tool-scale");
-const builderStateEditorEl = document.getElementById("builder-state-editor");
 const agentPanelEl = document.getElementById("agent-panel");
 const agentLastEl = document.getElementById("agent-last");
 const agentObservationEl = document.getElementById("agent-observation");
@@ -313,11 +82,6 @@ const simLidarOrderedDebugBtn = document.getElementById("sim-lidar-ordered-debug
 const simLidarNoiseBtn = document.getElementById("sim-lidar-noise");
 const simLidarMultiReturnBtn = document.getElementById("sim-lidar-multireturn");
 
-// Tagging / annotation state
-const HAS_EDITOR_PANEL = !!document.getElementById("tag-panel");
-const HAS_SIM_PANEL = !!document.getElementById("agent-panel");
-let appMode = HAS_EDITOR_PANEL ? (localStorage.getItem("sparkWorldMode") ?? "sim") : "sim"; // "sim" | "edit"
-const isStagingEditor = new URLSearchParams(window.location.search).get("staging") === "1";
 // ── dimos integration mode ──────────────────────────────────────────────────
 // Activated via ?dimos=1 URL param or window.__dimosMode (injected by Deno bridge server).
 // When active: internal VLM loop disabled, agent pose driven by external /odom,
@@ -325,21 +89,10 @@ const isStagingEditor = new URLSearchParams(window.location.search).get("staging
 const _dimosParams = new URLSearchParams(window.location.search);
 const dimosMode = _dimosParams.get("dimos") === "1" || window.__dimosMode === true;
 const dimosScene = _dimosParams.get("scene") || window.__dimosScene || null;
-let currentWorkspace = "scene"; // "scene" | "assetBuilder"
-const workspaceSnapshots = { scene: null, assetBuilder: null };
-const ASSET_LIBRARY_KEY = "sparkWorldAssetLibrary";
-let builderEditingAssetId = null;
-let builderEditingStateId = null;
-let builderShowTypeChoice = false;
-let builderPrimarySaveBtn = null;
-let assetLibraryRuntimeCache = null;
-let assetBuilderGrid = null;
 let simSensorViewMode = "rgb"; // "rgb" | "rgbd" | "lidar"
 let simCompareView = false; // show RGB + RGB-D + LiDAR side-by-side
 let simPanelCollapsed = false;
 let simUserCameraMode = localStorage.getItem("sparkWorldSimCameraMode") === "user" ? "user" : "agent";
-let editorSimLightingPreview = localStorage.getItem("sparkWorldEditorSimPreview") === "1";
-let _placementGhostLastUpdate = 0;
 let rgbdVizMode = "colormap"; // "colormap" | "gray"
 let rgbdAutoRange = true;
 let rgbdRangeMinM = 0.2;
@@ -414,11 +167,8 @@ tagsGroup.name = "tagsGroup";
 // Assets (Edit mode)
 let assets = []; // [{id,title,notes,states:[{id,name,glbName,dataBase64,interactions:[{id,label,to}]}],currentStateId,actions:[{id,label,from,to}],transform:{...}, _colliderHandle?}]
 let selectedAssetId = null;
-let pendingAssetUpload = null; // { states:[{id,name,glbName,dataBase64,interactions:[...]}], currentStateId }
 const assetsGroup = new THREE.Group();
 assetsGroup.name = "assetsGroup";
-let transformControls = null;
-let grid = null;
 const gltfLoader = new GLTFLoader();
 
 // =============================================================================
@@ -515,13 +265,6 @@ function createBlobShadow(assetId, footprintX, footprintZ, localGroundY, opts) {
 // =============================================================================
 let primitives = []; // [{id, type, name, dimensions:{...}, transform:{position,rotation,scale}, material:{color,roughness,metalness,textureDataUrl}, physics:bool, _colliderHandle?}]
 let selectedPrimitiveId = null;
-let groups = []; // [{id, name, children: [primId...]}]
-let collapsedGroupIds = new Set();
-let selectedGroupId = null;
-let multiSelectedPrimIds = new Set(); // for shift+click multi-select → grouping
-let groupSelectionMode = false; // checkbox-driven grouping mode (no keyboard required)
-let groupPivot = null;        // THREE.Object3D pivot for group transform
-let groupChildMeshes = [];    // meshes currently reparented to groupPivot
 const _assetBumpVelocities = new Map(); // assetId -> THREE.Vector3
 const _playerPosPrevForBump = new THREE.Vector3();
 let _playerPosPrevForBumpValid = false;
@@ -613,7 +356,7 @@ function getPrimitiveDimLabel(key) {
 // EDITOR LIGHTS – user-placed lights with full control
 // =============================================================================
 let editorLights = []; // [{id, type, name, color, intensity, position:{x,y,z}, target:{x,y,z}, distance, angle, penumbra, castShadow, _lightObj?, _helperObj?}]
-let selectedLightId = null;
+let groups = []; // [{id, name, children:[primId,...], pickable?}]
 const lightsGroup = new THREE.Group();
 lightsGroup.name = "lightsGroup";
 const _assetRaycaster = new THREE.Raycaster();
@@ -659,25 +402,13 @@ let agentUiRemoveBtn = null;
 let agentUiTaskInputEl = null;
 let agentUiTaskRunBtn = null;
 let agentTaskTargetId = null;
-let vibeCreatorApi = null;
 let agentBadgeLayerEl = null;
 const agentBadgeElsById = new Map();
-const EDITOR_TASK_WORKER_TARGET = 1;
-const EDITOR_MAX_AGENT_COUNT = 4;
-
-// Collision settings (simplified - always use GLB TriMesh)
-const collisionSettings = {
-  mode: "glb-trimesh",
-  quality: 65, // Legacy: only used if voxel fallback is needed
-};
+const MAX_AGENT_COUNT = 4;
 
 // =============================================================================
 // WORLD MANIFEST & LOADING
 // =============================================================================
-// Each world folder in /public/worlds/ should contain:
-//   - A .ply file (splats)
-//   - A .glb file (collision)
-//   - A .json file (tags/assets)
 
 // Helper to normalize asset schema (backward compat)
 // This function ensures all asset properties are properly loaded including states, interactions, and actions
@@ -777,6 +508,7 @@ renderer.shadowMap.enabled = false;
 renderer.shadowMap.type = THREE.BasicShadowMap;
 renderer.shadowMap.autoUpdate = false; // we control when shadow maps update
 
+const clock = new THREE.Clock();
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x06070a);
 
@@ -904,30 +636,6 @@ scene.add(assetsGroup);
 scene.add(primitivesGroup);
 scene.add(lightsGroup);
 
-// Placement ghost preview (edit mode): shows where new objects/assets will spawn.
-const placementGhostGroup = new THREE.Group();
-placementGhostGroup.name = "placementGhost";
-placementGhostGroup.visible = false;
-const placementGhostRingMat = new THREE.MeshBasicMaterial({
-  color: 0x6ee7b7,
-  transparent: true,
-  opacity: 0.55,
-  side: THREE.DoubleSide,
-  depthWrite: false,
-});
-const placementGhostRing = new THREE.Mesh(new THREE.RingGeometry(0.08, 0.12, 32), placementGhostRingMat);
-placementGhostGroup.add(placementGhostRing);
-const placementGhostDot = new THREE.Mesh(
-  new THREE.SphereGeometry(0.03, 10, 8),
-  new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9, depthWrite: false })
-);
-placementGhostGroup.add(placementGhostDot);
-const placementGhostLine = new THREE.Line(
-  new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 0.35)]),
-  new THREE.LineBasicMaterial({ color: 0x6ee7b7, transparent: true, opacity: 0.9, depthWrite: false })
-);
-placementGhostGroup.add(placementGhostLine);
-scene.add(placementGhostGroup);
 
 // -----------------------------------------------------------------------------
 // Sim sensor view modes (deterministic + lightweight)
@@ -1292,8 +1000,6 @@ function renderRgbdMetricPassOffscreen(overrideCamera) {
 
   // Ensure depth pass sees scene geometry, not lidar/overlay debug points.
   const savedOverride = scene.overrideMaterial;
-  const savedSplat = splatMesh ? splatMesh.visible : false;
-  const savedSpark = sparkRendererMesh ? sparkRendererMesh.visible : false;
   const savedAssets = assetsGroup.visible;
   const savedPrims = primitivesGroup.visible;
   const savedLights = lightsGroup.visible;
@@ -1302,8 +1008,6 @@ function renderRgbdMetricPassOffscreen(overrideCamera) {
   const savedRgbdPc = rgbdPcOverlayGroup.visible;
 
   scene.overrideMaterial = null;
-  if (splatMesh) splatMesh.visible = false;
-  if (sparkRendererMesh) sparkRendererMesh.visible = false;
   assetsGroup.visible = true;
   primitivesGroup.visible = true;
   lightsGroup.visible = true;
@@ -1322,8 +1026,6 @@ function renderRgbdMetricPassOffscreen(overrideCamera) {
   renderer.render(rgbdMetricScene, rgbdPostCamera);
 
   scene.overrideMaterial = savedOverride;
-  if (splatMesh) splatMesh.visible = savedSplat;
-  if (sparkRendererMesh) sparkRendererMesh.visible = savedSpark;
   assetsGroup.visible = savedAssets;
   primitivesGroup.visible = savedPrims;
   lightsGroup.visible = savedLights;
@@ -1392,7 +1094,7 @@ function readRgbdOverlayMetricDepthFrameMeters() {
 }
 
 function updateRgbdPcOverlayCloud(force = false) {
-  if (!rgbdPcOverlayOnLidar || simSensorViewMode !== "lidar" || appMode !== "sim" || lidarOrderedDebugView) {
+  if (!rgbdPcOverlayOnLidar || simSensorViewMode !== "lidar" || lidarOrderedDebugView) {
     _rgbdPcGeom.setDrawRange(0, 0);
     _rgbdPcGeom.attributes.position.needsUpdate = true;
     _rgbdPcGeom.attributes.color.needsUpdate = true;
@@ -1418,8 +1120,6 @@ function updateRgbdPcOverlayCloud(force = false) {
 
   // Low-res depth+metric pass for overlay to avoid expensive full-res readback stalls.
   const savedOverride = scene.overrideMaterial;
-  const savedSplat = splatMesh ? splatMesh.visible : false;
-  const savedSpark = sparkRendererMesh ? sparkRendererMesh.visible : false;
   const savedAssets = assetsGroup.visible;
   const savedPrims = primitivesGroup.visible;
   const savedLights = lightsGroup.visible;
@@ -1427,8 +1127,6 @@ function updateRgbdPcOverlayCloud(force = false) {
   const savedLidarViz = lidarVizGroup.visible;
   const savedRgbdPc = rgbdPcOverlayGroup.visible;
   scene.overrideMaterial = null;
-  if (splatMesh) splatMesh.visible = false;
-  if (sparkRendererMesh) sparkRendererMesh.visible = false;
   assetsGroup.visible = true;
   primitivesGroup.visible = true;
   lightsGroup.visible = true;
@@ -1448,8 +1146,6 @@ function updateRgbdPcOverlayCloud(force = false) {
   rgbdMetricMaterial.uniforms.uDepthTex.value = savedDepthTex;
 
   scene.overrideMaterial = savedOverride;
-  if (splatMesh) splatMesh.visible = savedSplat;
-  if (sparkRendererMesh) sparkRendererMesh.visible = savedSpark;
   assetsGroup.visible = savedAssets;
   primitivesGroup.visible = savedPrims;
   lightsGroup.visible = savedLights;
@@ -1996,12 +1692,10 @@ function updateSimSensorButtons() {
 
 function applySimPanelCollapsedState() {
   if (!overlayEl || !agentPanelEl) return;
-  const isSimMode = appMode === "sim";
-  const shouldCollapse = isSimMode && simPanelCollapsed;
+  const shouldCollapse = simPanelCollapsed;
   overlayEl.classList.toggle("sim-panel-collapsed", shouldCollapse);
-  // Keep panel visible in edit mode so vision/request/response remain inspectable.
-  agentPanelEl.classList.toggle("hidden", isSimMode ? shouldCollapse : false);
-  simPanelOpenBtn?.classList.toggle("hidden", !isSimMode || !shouldCollapse);
+  agentPanelEl.classList.toggle("hidden", shouldCollapse);
+  simPanelOpenBtn?.classList.toggle("hidden", !shouldCollapse);
 }
 
 function lidarRangeColor01(t) {
@@ -2475,21 +2169,13 @@ function updateLidarPointCloud() {
 }
 
 function applySimSensorViewMode() {
-  // Feature is sim-focused; always restore normal rendering in edit.
-  if (appMode !== "sim") {
-    simSensorViewMode = "rgb";
-    simCompareView = false;
-  }
-
   if (simSensorViewMode === "rgb") {
     // Restore default rendering.
     scene.overrideMaterial = _savedOverrideMaterial;
-    if (splatMesh) splatMesh.visible = true;
-    if (sparkRendererMesh) sparkRendererMesh.visible = true;
     assetsGroup.visible = true;
     primitivesGroup.visible = true;
     lightsGroup.visible = true;
-    tagsGroup.visible = shouldShowEditorGuides();
+    tagsGroup.visible = false;
     lidarVizGroup.visible = false;
     rgbdPcOverlayGroup.visible = false;
     _rgbdPcGeom.setDrawRange(0, 0);
@@ -2502,8 +2188,6 @@ function applySimSensorViewMode() {
     // metric camera-space Z visualization. Do not override scene materials.
     _savedOverrideMaterial = null;
     scene.overrideMaterial = null;
-    if (splatMesh) splatMesh.visible = false;
-    if (sparkRendererMesh) sparkRendererMesh.visible = false;
     assetsGroup.visible = true;
     primitivesGroup.visible = true;
     lightsGroup.visible = true;
@@ -2520,8 +2204,6 @@ function applySimSensorViewMode() {
     // LiDAR mode: hide scene visuals and render deterministic point cloud only.
     _savedOverrideMaterial = null;
     scene.overrideMaterial = null;
-    if (splatMesh) splatMesh.visible = false;
-    if (sparkRendererMesh) sparkRendererMesh.visible = false;
     assetsGroup.visible = false;
     primitivesGroup.visible = false;
     lightsGroup.visible = false;
@@ -2552,52 +2234,6 @@ function setSimSensorViewMode(mode) {
 const controls = new PointerLockControls(camera, document.body);
 scene.add(controls.object);
 
-// Transform gizmo for edit-mode asset placement.
-transformControls = new TransformControls(camera, renderer.domElement);
-transformControls.visible = false;
-transformControls.enabled = false;
-transformControls.addEventListener("dragging-changed", (e) => {
-  controls.enabled = !e.value;
-  // When drag ENDS, rebuild colliders (expensive — only do once, not per-frame)
-  if (!e.value) {
-    if (selectedGroupId && groupPivot) persistGroupTransformsAndRebuild();
-    else if (selectedAssetId) persistSelectedAssetTransform();
-    else if (selectedPrimitiveId) persistSelectedPrimitiveTransform();
-    else if (selectedLightId) persistSelectedLightTransform();
-  }
-});
-transformControls.addEventListener("objectChange", () => {
-  // During drag: only update the data model + XYZ inputs (cheap).
-  // Colliders are rebuilt on drag-end above.
-  if (selectedGroupId && groupPivot) {
-    persistGroupTransforms();
-  } else if (selectedAssetId) {
-    const a = getSelectedAsset();
-    const obj = assetsGroup.getObjectByName(`asset:${a?.id}`);
-    if (a && obj) {
-      a.transform = {
-        position: { x: obj.position.x, y: obj.position.y, z: obj.position.z },
-        rotation: { x: obj.rotation.x, y: obj.rotation.y, z: obj.rotation.z },
-        scale: { x: obj.scale.x, y: obj.scale.y, z: obj.scale.z },
-      };
-    }
-  } else if (selectedPrimitiveId) {
-    const prim = getSelectedPrimitive();
-    const obj = primitivesGroup.getObjectByName(`prim:${prim?.id}`);
-    if (prim && obj) {
-      prim.transform = {
-        position: { x: obj.position.x, y: obj.position.y, z: obj.position.z },
-        rotation: { x: obj.rotation.x, y: obj.rotation.y, z: obj.rotation.z },
-        scale: { x: obj.scale.x, y: obj.scale.y, z: obj.scale.z },
-      };
-    }
-  } else if (selectedLightId) {
-    const ld = getSelectedLight();
-    if (ld) syncLightFromProxy(ld);
-  }
-  populateTransformInputs();
-});
-scene.add(transformControls);
 
 const keys = {
   forward: false,
@@ -2666,7 +2302,6 @@ function loadTagsForWorld() {
   draftTag = null;
   selectedAssetId = null;
   selectedPrimitiveId = null;
-  selectedLightId = null;
   rebuildTagMarkers();
   renderTagsList();
   renderTagPanel();
@@ -2674,18 +2309,12 @@ function loadTagsForWorld() {
   renderAssetsList();
   rebuildAllPrimitives();
   renderPrimitivesList();
-  renderPrimitiveProps();
   rebuildAllEditorLights();
-  renderLightsList();
-  renderLightProps();
   applySceneSkySettings();
   applySceneRgbBackground();
 }
 
 function saveTagsForWorld() {
-  if (currentWorkspace !== "scene") {
-    return;
-  }
   try {
     let rawState = localStorage.getItem("sparkWorldStateByWorld");
     let byWorld = {};
@@ -2786,131 +2415,17 @@ function setWorldKey(key) {
   loadTagsForWorld();
 }
 
-function shouldShowEditorGuides() {
-  return appMode === "edit" && !editorSimLightingPreview;
-}
-
-function updateEditorSimLightPreviewUi() {
-  if (!editorSimLightPreviewBtn) return;
-  editorSimLightPreviewBtn.classList.toggle("active", editorSimLightingPreview);
-  editorSimLightPreviewBtn.classList.toggle("tb-muted", !editorSimLightingPreview);
-  editorSimLightPreviewBtn.textContent = editorSimLightingPreview ? "Editor View" : "Sim View";
-  editorSimLightPreviewBtn.title = editorSimLightingPreview
-    ? "Restore editor helpers and gizmos"
-    : "Hide editor helpers to preview sim lighting";
-}
-
-function applyEditorGuideVisibility() {
-  const showGuides = shouldShowEditorGuides();
-  if (grid) grid.visible = showGuides;
-  if (tagsGroup) tagsGroup.visible = showGuides;
-  if (!showGuides && placementGhostGroup) placementGhostGroup.visible = false;
-  if (transformControls) {
-    if (!showGuides) {
-      transformControls.detach();
-      transformControls.visible = false;
-      transformControls.enabled = false;
-    } else {
-      const hasSelection = !!selectedAssetId || !!selectedPrimitiveId || !!selectedLightId;
-      transformControls.visible = hasSelection;
-      transformControls.enabled = hasSelection;
-    }
-  }
-  for (const ld of editorLights) {
-    if (ld._proxyObj) ld._proxyObj.visible = showGuides;
-    if (ld._helperObj) ld._helperObj.visible = showGuides;
-  }
-}
-
-function setAppMode(mode) {
-  let target = mode === "edit" ? "edit" : "sim";
-  // Clamp mode to what this page can actually render.
-  // This prevents leaking a stored "edit" mode into sim-only pages.
-  if (target === "edit" && !HAS_EDITOR_PANEL) target = "sim";
-  if (target === "sim" && !HAS_SIM_PANEL) target = "edit";
-  appMode = target;
-  localStorage.setItem("sparkWorldMode", appMode);
-  document.documentElement.dataset.mode = appMode;
-
-  // Keep VLM enabled in both edit and sim so the agent can assist during creation.
-  for (const a of aiAgents) {
-    if (a?.vlm) a.vlm.enabled = true;
-  }
-  renderTagPanel();
-  applySimPanelCollapsedState();
-  renderAgentTaskUi();
-
-  applyEditorGuideVisibility();
-  updateEditorSimLightPreviewUi();
-
-  // Close modal on mode switch.
-  showModal(false);
-  if (appMode === "edit" && agentCameraFollow) {
-    disableAgentCameraFollow();
-  }
-  applySimSensorViewMode();
-}
 
 function getSelectedTag() {
   return tags.find((t) => t.id === selectedTagId) ?? null;
 }
 
 function renderTagPanel() {
-  const sel = getSelectedTag();
-  if (tagSelectedEl) {
-    if (draftTag) {
-      tagSelectedEl.textContent = `Editing tag…`;
-    } else if (!sel) {
-      tagSelectedEl.textContent =
-        appMode === "edit"
-          ? `Edit mode: aim at a surface and press T to place a tag.`
-          : `Simulation mode: click a tag marker to view.`;
-    } else {
-      const lines = [
-        `${sel.title || "(untitled)"}`,
-        sel.notes ? `\n${sel.notes}` : "",
-        `\nRadius: ${Number(sel.radius ?? 1.5).toFixed(2)}`,
-      ].join("");
-      tagSelectedEl.textContent = lines.trim();
-    }
-  }
-
-  if (tagFormEl) {
-    const show = appMode === "edit" && !!draftTag;
-    tagFormEl.classList.toggle("hidden", !show);
-  }
+  // No-op in sim-only mode (editor tag panel not present)
 }
 
 function renderTagsList() {
-  if (!tagsListEl) return;
-  tagsListEl.innerHTML = "";
-  for (const t of tags) {
-    const el = document.createElement("div");
-    el.className = "tag-item" + (t.id === selectedTagId ? " active" : "");
-    const title = (t.title || "(untitled)").slice(0, 40);
-    el.innerHTML = `${escapeHtml(title)}<small>tag</small>`;
-    el.addEventListener("click", () => {
-      selectedTagId = t.id;
-      selectedPrimitiveId = null;
-      selectedLightId = null;
-      selectedAssetId = null;
-      if (appMode === "edit") {
-        draftTag = { ...t };
-        if (tagTitleEl) tagTitleEl.value = String(draftTag.title ?? "");
-        if (tagNotesEl) tagNotesEl.value = String(draftTag.notes ?? "");
-        if (tagRadiusEl) tagRadiusEl.value = String(Number(draftTag.radius ?? 1.5));
-        if (tagRadiusValueEl) tagRadiusValueEl.textContent = Number(draftTag.radius ?? 1.5).toFixed(2);
-      } else {
-        draftTag = null;
-      }
-      updateMarkerMaterials();
-      renderTagsList();
-      renderTagPanel();
-      updateDetailsPanel();
-    });
-    tagsListEl.appendChild(el);
-  }
-  updateOutlinerCounts();
+  // No-op in sim-only mode (editor tags list not present)
 }
 
 const markerGeom = new THREE.SphereGeometry(0.08, 12, 12);
@@ -3056,7 +2571,6 @@ function clearAgentInspectorViews() {
 }
 
 function showEditSpawnedAgentsTab() {
-  if (appMode !== "edit") return;
   const btn = document.getElementById("vibe-tab-agents");
   btn?.click?.();
 }
@@ -3118,7 +2632,6 @@ function ensureAgentControlStrip() {
   agentUiTaskRunBtn = document.getElementById("agent-selected-task-run");
 
   agentUiSpawnBtn?.addEventListener("click", () => {
-    if (appMode !== "edit") return;
     void spawnOrMoveAiAtAim({ createNew: true, silent: false, ephemeral: false }).then(() => {
       const newest = aiAgents[aiAgents.length - 1];
       if (newest?.id) selectAgentInspector(newest.id);
@@ -3153,7 +2666,7 @@ function ensureAgentControlStrip() {
   });
   const runSelectedTask = () => {
     const a = getAgentById(selectedAgentInspectorId);
-    if (!a || appMode !== "edit") return;
+    if (!a) return;
     const text = String(agentUiTaskInputEl?.value || "").trim();
     if (!text) return;
     if (agentTask.active) endAgentTask("replace-task");
@@ -3172,21 +2685,12 @@ function ensureAgentControlStrip() {
 function renderSelectedAgentControls() {
   ensureAgentControlStrip();
   if (!agentUiSelectedLabelEl || !agentUiFollowBtn || !agentUiStopBtn || !agentUiRemoveBtn) return;
-  const strip = document.getElementById("agent-control-strip");
-  if (strip) {
-    // Keep this strip exclusive to right panel UI in edit mode.
-    strip.classList.toggle("hidden", appMode !== "edit");
-    strip.style.display = appMode === "edit" ? "" : "none";
-  }
   const a = getAgentById(selectedAgentInspectorId);
   const has = !!a;
   agentUiSelectedLabelEl.textContent = has ? `Selected: ${a.id}` : "Selected: none";
-  if (agentUiSpawnBtn) agentUiSpawnBtn.disabled = appMode !== "edit";
   agentUiFollowBtn.disabled = !has;
   agentUiStopBtn.disabled = !has;
   agentUiRemoveBtn.disabled = !has;
-  if (agentUiTaskInputEl) agentUiTaskInputEl.disabled = !has || appMode !== "edit";
-  if (agentUiTaskRunBtn) agentUiTaskRunBtn.disabled = !has || appMode !== "edit";
   agentUiFollowBtn.textContent = has && agentCameraFollow && agentCameraFollowId === a.id ? "Unfollow POV" : "Follow POV";
 }
 
@@ -3236,22 +2740,15 @@ function renderAgentTaskUi() {
   const bar = document.getElementById("agent-command-bar");
   const hasAgent = aiAgents.length > 0;
 
-  if (bar) {
-    // In edit mode, controls live in the Spawned Agents tab.
-    bar.style.display = appMode === "edit" ? "none" : "";
-  }
-
-  // In edit mode keep spawn visible so users can add parallel agents.
-  if (spawnAiBtn) spawnAiBtn.style.display = hasAgent && appMode !== "edit" ? "none" : "";
+  if (bar) bar.style.display = "";
+  if (spawnAiBtn) spawnAiBtn.style.display = hasAgent ? "none" : "";
 
   if (!agentTaskStatusEl || !agentTaskInputEl || !agentTaskStartBtn || !agentTaskEndBtn) return;
 
   if (!agentTask.active) {
-    // Keep command bar clean: no persistent "Done (...)" suffixes.
     agentTaskStatusEl.textContent = "";
     agentTaskInputEl.disabled = false;
-    // In edit mode we can auto-spawn worker agents when starting a task.
-    agentTaskStartBtn.disabled = appMode === "edit" ? false : !hasAgent;
+    agentTaskStartBtn.disabled = !hasAgent;
     agentTaskEndBtn.disabled = true;
     if (bar) bar.classList.remove("active");
   } else {
@@ -3353,15 +2850,6 @@ async function startAgentTask(instruction, { autoPool = true, targetAgentId = nu
   const text = String(instruction || "").trim();
   if (!text) return;
 
-  // Editor mode: spin up a small worker pool for parallelized task execution.
-  if (appMode === "edit" && autoPool && !targetAgentId) {
-    await ensureEditorWorkerPool(EDITOR_TASK_WORKER_TARGET);
-    if (aiAgents.length === 0) {
-      setStatus("Couldn't spawn editor workers. Aim at a valid area and press Spawn.");
-      return;
-    }
-  }
-
   const now = Date.now();
   const taskState = {
     active: true,
@@ -3386,8 +2874,7 @@ async function startAgentTask(instruction, { autoPool = true, targetAgentId = nu
   agentUiPush(`${new Date().toLocaleTimeString()}\nTASK START\n${text}${target ? ` [${target.id}]` : ` [${targets.length} agents]`}`);
   renderAgentTaskUi();
   
-  // Follow only when user selected agent camera mode.
-  if (appMode === "sim" && simUserCameraMode === "agent") enableAgentCameraFollow();
+  if (simUserCameraMode === "agent") enableAgentCameraFollow();
 }
 
 function endAgentTask(reason = "manual", agentId = null) {
@@ -3426,10 +2913,6 @@ function endAgentTask(reason = "manual", agentId = null) {
 
   renderAgentTaskUi();
 
-  // Editor worker agents are ephemeral: complete/stop -> vanish.
-  if (appMode === "edit") {
-    despawnEphemeralAgents("task-end");
-  }
 }
 
 function rebuildTagMarkers() {
@@ -3463,77 +2946,8 @@ function updateMarkerMaterials() {
   }
 }
 
-function showModal(show) {
-  if (!modalEl) return;
-  // When modal opens, ensure pointer lock and movement/controls don't steal focus from inputs.
-  if (show) {
-    controls?.unlock?.();
-    controls.enabled = false;
-  } else {
-    controls.enabled = true;
-  }
-  modalEl.classList.toggle("hidden", !show);
-  modalEl.setAttribute("aria-hidden", show ? "false" : "true");
-  if (show) {
-    // Focus first input so keyboard immediately works (and stays focused).
-    queueMicrotask(() => assetTitleEl?.focus?.());
-  }
-}
-
-// Prevent global key handlers from interfering with typing inside the modal.
-modalEl?.addEventListener("keydown", (e) => {
-  e.stopPropagation();
-});
-
 function renderAssetModal() {
-  if (!pendingAssetUpload) return;
-  const states = pendingAssetUpload.states || [];
-  const renderStateOptions = (selectedId) =>
-    states
-      .map((s) => {
-        const id = escapeHtml(s.id);
-        const label = escapeHtml(s.name || s.glbName || s.id);
-        const sel = selectedId === s.id ? " selected" : "";
-        return `<option value="${id}"${sel}>${label}</option>`;
-      })
-      .join("");
-
-  if (assetStatesContainerEl) {
-    assetStatesContainerEl.innerHTML = states
-      .map((s, idx) => {
-        const checked = pendingAssetUpload.currentStateId === s.id ? "checked" : "";
-        const hasFile = s.dataBase64 ? "✓" : "Pick .glb";
-        if (!Array.isArray(s.interactions)) s.interactions = [];
-        return `
-<div class="asset-state-row" data-state-id="${escapeHtml(s.id)}">
-  <div class="asset-state-row-top">
-    <label><input type="radio" name="asset-initial-state" value="${escapeHtml(s.id)}" ${checked}/> Initial</label>
-    <input data-field="name" type="text" value="${escapeHtml(s.name || `state ${idx + 1}`)}" placeholder="State name" />
-    <label class="file"><input data-field="file" type="file" accept=".glb" /><span>${escapeHtml(hasFile)}</span></label>
-    ${states.length > 1 ? `<button data-action="remove" type="button">Remove</button>` : ""}
-  </div>
-  <div style="font-size:12px;color:var(--muted);font-weight:700;">${escapeHtml(s.glbName || "")}</div>
-  <div class="asset-interactions-title">Interactions</div>
-  <div class="asset-interactions">
-    ${(s.interactions || [])
-      .map((it) => {
-        const id = escapeHtml(it.id);
-        const label = escapeHtml(it.label || "");
-        return `<div class="asset-interaction-row" data-interaction-id="${id}">
-  <input data-field="ilabel" type="text" value="${label}" placeholder="Action label (e.g. open / turn on)" />
-  <select data-field="ito" class="select">${renderStateOptions(it.to)}</select>
-  <button data-action="remove-interaction" type="button">Remove</button>
-</div>`;
-      })
-      .join("")}
-    <div class="tag-panel-row" style="margin-top:6px;">
-      <button data-action="add-interaction" type="button">Add interaction</button>
-    </div>
-  </div>
-</div>`;
-      })
-      .join("");
-  }
+  // No-op in sim-only mode (asset upload modal not present)
 }
 
 function base64FromArrayBuffer(buf) {
@@ -3639,92 +3053,14 @@ function renderAssetsList() {
     el.addEventListener("click", () => selectAsset(a.id));
     assetsListEl.appendChild(el);
   }
-  updateOutlinerCounts();
 }
 
 function selectAsset(id) {
-  detachGroupTransform();
-  selectedGroupId = null;
-  const gd = document.getElementById("group-details");
-  if (gd) gd.remove();
-
   selectedAssetId = id;
   if (id) {
     selectedPrimitiveId = null;
-    selectedLightId = null;
-    selectedSceneLightId = null;
-    renderPrimitivesList();
-    renderPrimitiveProps();
-    renderLightsList();
-    renderLightProps();
-    renderSceneLightsList();
-    renderSceneLightProps();
   }
   renderAssetsList();
-  updateDetailsPanel();
-  const obj = assetsGroup.getObjectByName(`asset:${id}`);
-  if (appMode === "edit" && obj) {
-    transformControls.attach(obj);
-    transformControls.enabled = true;
-    transformControls.visible = true;
-  } else {
-    transformControls.detach();
-    transformControls.enabled = false;
-    transformControls.visible = false;
-  }
-  // Update debug buttons availability.
-  if (assetInteractSelectedBtn) {
-    const a = getSelectedAsset();
-    const cur = a?.currentStateId || a?.currentState || "A";
-    const outs = (a?.actions || []).filter((x) => x.from === cur);
-    assetInteractSelectedBtn.disabled = !(a && outs.length);
-    if (assetInteractActionEl) {
-      assetInteractActionEl.innerHTML = outs
-        .map((x) => `<option value="${escapeHtml(x.id)}">${escapeHtml(x.label || "interact")} → ${escapeHtml(x.to)}</option>`)
-        .join("");
-      assetInteractActionEl.disabled = !(a && outs.length);
-    }
-  }
-  if (assetDeleteSelectedBtn) assetDeleteSelectedBtn.disabled = !getSelectedAsset();
-  if (assetDuplicateSelectedBtn) assetDuplicateSelectedBtn.disabled = !getSelectedAsset();
-  if (assetEditStatesSelectedBtn) assetEditStatesSelectedBtn.disabled = !getSelectedAsset();
-  // Populate shadow checkboxes and blob shadow controls
-  const selAsset = getSelectedAsset();
-  if (assetCastShadowEl) assetCastShadowEl.checked = selAsset?.castShadow === true;
-  if (assetReceiveShadowEl) assetReceiveShadowEl.checked = selAsset?.receiveShadow === true;
-  if (assetSelectedPickableEl) assetSelectedPickableEl.checked = selAsset?.pickable === true;
-  if (assetBumpableEl) assetBumpableEl.checked = selAsset?.bumpable === true;
-  if (assetBumpControlsEl) assetBumpControlsEl.classList.toggle("hidden", !(selAsset?.bumpable));
-  if (assetBumpResponseEl) assetBumpResponseEl.value = String(selAsset?.bumpResponse ?? 0.9);
-  if (assetBumpResponseValEl) assetBumpResponseValEl.textContent = Number(selAsset?.bumpResponse ?? 0.9).toFixed(2);
-  if (assetBumpDampingEl) assetBumpDampingEl.value = String(selAsset?.bumpDamping ?? 0.9);
-  if (assetBumpDampingValEl) assetBumpDampingValEl.textContent = Number(selAsset?.bumpDamping ?? 0.9).toFixed(2);
-  // Show/hide blob shadow sub-controls based on castShadow state
-  if (blobShadowControlsEl) blobShadowControlsEl.classList.toggle("hidden", !(selAsset?.castShadow));
-  if (selAsset?.castShadow) {
-    const bs = selAsset.blobShadow || {};
-    if (blobShadowOpacityEl) { blobShadowOpacityEl.value = bs.opacity ?? 0.5; }
-    if (blobShadowOpacityValEl) blobShadowOpacityValEl.textContent = (bs.opacity ?? 0.5).toFixed(2);
-    if (blobShadowScaleEl) { blobShadowScaleEl.value = bs.scale ?? 1.0; }
-    if (blobShadowScaleValEl) blobShadowScaleValEl.textContent = (bs.scale ?? 1.0).toFixed(2);
-    if (blobShadowStretchEl) { blobShadowStretchEl.value = bs.stretch ?? 1.0; }
-    if (blobShadowStretchValEl) blobShadowStretchValEl.textContent = (bs.stretch ?? 1.0).toFixed(2);
-    if (blobShadowRotEl) { blobShadowRotEl.value = bs.rotationDeg ?? 0; }
-    if (blobShadowRotValEl) blobShadowRotValEl.textContent = `${Math.round(bs.rotationDeg ?? 0)}°`;
-    if (blobShadowOxEl) blobShadowOxEl.value = bs.offsetX ?? 0;
-    if (blobShadowOyEl) blobShadowOyEl.value = bs.offsetY ?? 0;
-    if (blobShadowOzEl) blobShadowOzEl.value = bs.offsetZ ?? 0;
-  }
-
-  // Update transform toolbar state.
-  const hasSel = !!getSelectedAsset();
-  if (assetToolMoveBtn) assetToolMoveBtn.disabled = !hasSel;
-  if (assetToolRotateBtn) assetToolRotateBtn.disabled = !hasSel;
-  if (assetToolScaleBtn) assetToolScaleBtn.disabled = !hasSel;
-  const mode = transformControls?.getMode?.() || "translate";
-  assetToolMoveBtn?.classList.toggle("active", hasSel && mode === "translate");
-  assetToolRotateBtn?.classList.toggle("active", hasSel && mode === "rotate");
-  assetToolScaleBtn?.classList.toggle("active", hasSel && mode === "scale");
 }
 
 function persistSelectedAssetTransform() {
@@ -4098,218 +3434,6 @@ function getNearbyPrimitivesForAgent(agent, maxDist = 2.5) {
   return out.slice(0, 20);
 }
 
-function agentCreatePrimitiveInEditor({ shape, agent = null }) {
-  if (appMode !== "edit") return { ok: false, reason: "not-edit-mode" };
-  const allowed = new Set(["box", "sphere", "cylinder", "cone", "torus", "plane"]);
-  const type = String(shape || "box").toLowerCase();
-  if (!allowed.has(type)) return { ok: false, reason: "invalid-shape" };
-  const placement = agent
-    ? getPlacementFromAgentView(agent, { raycastDistance: 500, fallbackDistance: 2.5, surfaceOffset: 0.5 })
-    : getPlacementAtCrosshair({ raycastDistance: 250, surfaceOffset: 0.5 });
-  if (agent && !placement.hit) return { ok: false, reason: "no-surface-in-view" };
-  addPrimitiveAtPosition(type, placement.position);
-  return { ok: true, createdId: selectedPrimitiveId, type };
-}
-
-function findAssetLibraryRecordByName(name) {
-  const q = String(name || "").trim().toLowerCase();
-  if (!q) return null;
-  const records = readAssetLibraryRecords();
-  if (!Array.isArray(records) || records.length === 0) return null;
-  let exact = records.find((r) => String(r?.name || "").trim().toLowerCase() === q);
-  if (exact) return exact;
-  let starts = records.find((r) => String(r?.name || "").trim().toLowerCase().startsWith(q));
-  if (starts) return starts;
-  return records.find((r) => String(r?.name || "").trim().toLowerCase().includes(q)) || null;
-}
-
-function normalizeAgentAssetPrompt(text) {
-  return String(text || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
-}
-
-function getAgentRecentGeneratedAssets(agent, limit = 6) {
-  const list = Array.isArray(agent?._recentGeneratedAssets) ? agent._recentGeneratedAssets : [];
-  return list.slice(-Math.max(1, Number(limit) || 6)).reverse();
-}
-
-async function agentSpawnLibraryAssetInEditor({ assetName, agent = null }) {
-  if (appMode !== "edit") return { ok: false, reason: "not-edit-mode" };
-  const rec = findAssetLibraryRecordByName(assetName);
-  if (!rec) return { ok: false, reason: "asset-not-found" };
-  const placement = agent
-    ? getPlacementFromAgentView(agent, { raycastDistance: 500, fallbackDistance: 2.5, surfaceOffset: 0.02 })
-    : getPlacementAtCrosshair({ raycastDistance: 500, surfaceOffset: 0.02 });
-  if (agent && !placement.hit) return { ok: false, reason: "no-surface-in-view" };
-  await spawnShapeLibraryAsset(rec, {
-    targetX: placement.position.x,
-    targetY: placement.position.y,
-    targetZ: placement.position.z,
-  });
-  return { ok: true, assetId: selectedAssetId || null, assetName: rec.name || "" };
-}
-
-async function agentGenerateAssetInEditor({ agent = null, prompt, placeNow = true, allowMultiple = false, count = 1 } = {}) {
-  if (appMode !== "edit") return { ok: false, reason: "not-edit-mode" };
-  const text = String(prompt || "").trim();
-  if (!text) return { ok: false, reason: "missing-prompt" };
-  if (!vibeCreatorApi?.createAssetHeadless) return { ok: false, reason: "vibe-api-unavailable" };
-  const normalizedPrompt = normalizeAgentAssetPrompt(text);
-  const taskEpoch = Number(agentTask?.startedAt || 0);
-  const multiRequested = !!allowMultiple || Number(count) > 1;
-
-  if (agent) {
-    if (!agent._editorAssetGenState || Number(agent._editorAssetGenState.taskEpoch || 0) !== taskEpoch) {
-      agent._editorAssetGenState = { taskEpoch, byPrompt: new Map() };
-      agent._recentGeneratedAssets = [];
-    }
-    const prev = agent._editorAssetGenState.byPrompt.get(normalizedPrompt) || null;
-    if (prev && !multiRequested) {
-      if (prev.placedAssetId) {
-        selectAsset(prev.placedAssetId);
-      }
-      setStatus(`Agent reused generated asset: ${prev.assetName || "asset"}`);
-      return {
-        ok: true,
-        reused: true,
-        assetName: prev.assetName || "",
-        assetId: prev.placedAssetId || null,
-        placed: !!prev.placedAssetId,
-      };
-    }
-  }
-
-  setStatus("Agent generating asset (headless)...");
-  const rec = await vibeCreatorApi.createAssetHeadless(text);
-  if (!rec) return { ok: false, reason: "generation-failed" };
-
-  let placedAssetId = null;
-  if (placeNow !== false) {
-    const placement = agent
-      ? getPlacementFromAgentView(agent, { raycastDistance: 500, fallbackDistance: 2.5, surfaceOffset: 0.02 })
-      : getPlacementAtCrosshair({ raycastDistance: 500, surfaceOffset: 0.02 });
-    placedAssetId = await spawnShapeLibraryAsset(rec, {
-      targetX: placement.position.x,
-      targetY: placement.position.y,
-      targetZ: placement.position.z,
-    });
-  }
-  if (agent) {
-    if (!agent._editorAssetGenState || Number(agent._editorAssetGenState.taskEpoch || 0) !== taskEpoch) {
-      agent._editorAssetGenState = { taskEpoch, byPrompt: new Map() };
-      agent._recentGeneratedAssets = [];
-    }
-    agent._editorAssetGenState.byPrompt.set(normalizedPrompt, {
-      assetName: rec.name || "",
-      placedAssetId: placedAssetId || null,
-      createdAt: Date.now(),
-    });
-    const recent = Array.isArray(agent._recentGeneratedAssets) ? agent._recentGeneratedAssets : [];
-    recent.push({
-      id: placedAssetId || "",
-      name: rec.name || "",
-      prompt: text,
-      createdAt: Date.now(),
-    });
-    if (recent.length > 12) recent.splice(0, recent.length - 12);
-    agent._recentGeneratedAssets = recent;
-  }
-  setStatus(`Agent generated asset: ${rec.name || "new asset"}`);
-  return { ok: true, assetName: rec.name || "", assetId: placedAssetId || null, placed: placeNow !== false };
-}
-
-function agentTransformObjectInEditor({
-  targetType,
-  targetId,
-  agent = null,
-  moveX = 0,
-  moveY = 0,
-  moveZ = 0,
-  rotateYDeg = 0,
-  scaleMul = 1,
-  setPositionX,
-  setPositionY,
-  setPositionZ,
-  setRotationYDeg,
-  setScaleX,
-  setScaleY,
-  setScaleZ,
-  snapToCrosshair = false,
-} = {}) {
-  if (appMode !== "edit") return { ok: false, reason: "not-edit-mode" };
-  const type = String(targetType || "").toLowerCase();
-  const id = String(targetId || "");
-  if (!id || (type !== "asset" && type !== "primitive")) return { ok: false, reason: "bad-target" };
-
-  const obj = type === "asset"
-    ? assetsGroup.getObjectByName(`asset:${id}`)
-    : primitivesGroup.getObjectByName(`prim:${id}`);
-  if (!obj) return { ok: false, reason: "target-missing" };
-
-  const absPosX = Number(setPositionX);
-  const absPosY = Number(setPositionY);
-  const absPosZ = Number(setPositionZ);
-  const hasAbsolutePosition = Number.isFinite(absPosX) || Number.isFinite(absPosY) || Number.isFinite(absPosZ);
-  if (hasAbsolutePosition) {
-    obj.position.set(
-      Number.isFinite(absPosX) ? absPosX : obj.position.x,
-      Number.isFinite(absPosY) ? absPosY : obj.position.y,
-      Number.isFinite(absPosZ) ? absPosZ : obj.position.z
-    );
-  } else if (snapToCrosshair) {
-    const placement = agent
-      ? getPlacementFromAgentView(agent, { raycastDistance: 500, fallbackDistance: 2.5, surfaceOffset: 0.02 })
-      : getPlacementAtCrosshair({ raycastDistance: 500, surfaceOffset: 0.02 });
-    if (agent && !placement.hit) return { ok: false, reason: "no-surface-in-view" };
-    obj.position.set(placement.position.x, placement.position.y, placement.position.z);
-  }
-
-  const dx = Number(moveX) || 0;
-  const dy = Number(moveY) || 0;
-  const dz = Number(moveZ) || 0;
-  if (dx || dy || dz) obj.position.set(obj.position.x + dx, obj.position.y + dy, obj.position.z + dz);
-
-  const absYawDeg = Number(setRotationYDeg);
-  if (Number.isFinite(absYawDeg)) {
-    obj.rotation.y = (absYawDeg * Math.PI) / 180;
-  } else {
-    const yawRad = ((Number(rotateYDeg) || 0) * Math.PI) / 180;
-    if (yawRad) obj.rotation.y += yawRad;
-  }
-
-  const absSx = Number(setScaleX);
-  const absSy = Number(setScaleY);
-  const absSz = Number(setScaleZ);
-  const hasAbsoluteScale = Number.isFinite(absSx) || Number.isFinite(absSy) || Number.isFinite(absSz);
-  if (hasAbsoluteScale) {
-    obj.scale.set(
-      Number.isFinite(absSx) ? Math.max(0.01, absSx) : obj.scale.x,
-      Number.isFinite(absSy) ? Math.max(0.01, absSy) : obj.scale.y,
-      Number.isFinite(absSz) ? Math.max(0.01, absSz) : obj.scale.z
-    );
-  } else {
-    const mul = Number(scaleMul);
-    if (Number.isFinite(mul) && Math.abs(mul - 1) > 1e-4) {
-    obj.scale.set(
-      Math.max(0.01, obj.scale.x * mul),
-      Math.max(0.01, obj.scale.y * mul),
-      Math.max(0.01, obj.scale.z * mul)
-    );
-    }
-  }
-
-  if (type === "asset") {
-    selectAsset(id);
-    persistSelectedAssetTransform();
-  } else {
-    selectPrimitive(id);
-    persistSelectedPrimitiveTransform();
-  }
-  setStatus(`Agent transformed ${type}: ${id.slice(0, 8)}…`);
-  return { ok: true };
-}
 
 async function agentInteractAsset({ agent, assetId, actionId }) {
   console.log(`[INTERACT] Attempting interaction: assetId="${assetId}", actionId="${actionId}"`);
@@ -5055,11 +4179,6 @@ function deleteSelectedAsset() {
   _assetBumpVelocities.delete(a.id);
   assets = assets.filter((x) => x.id !== a.id);
   selectedAssetId = null;
-  transformControls?.detach();
-  if (transformControls) {
-    transformControls.visible = false;
-    transformControls.enabled = false;
-  }
   saveTagsForWorld();
   renderAssetsList();
   setStatus("Asset deleted.");
@@ -5070,8 +4189,7 @@ async function interactSelectedAssetDebug() {
   if (!a) return;
   const state = a.currentStateId || a.currentState || "A";
   const outgoing = (a.actions || []).filter((x) => x.from === state);
-  const pickId = assetInteractActionEl?.value;
-  const act = (pickId ? outgoing.find((x) => x.id === pickId) : null) || outgoing[0] || null;
+  const act = outgoing[0] || null;
   if (!act) {
     setStatus("Selected asset has no valid action from its current state.");
     return;
@@ -5167,7 +4285,6 @@ function _cloneAssetWithFreshIds(src) {
 }
 
 async function duplicateSelectedAsset() {
-  if (appMode !== "edit") return;
   const a = getSelectedAsset();
   if (!a) return;
   const dup = _cloneAssetWithFreshIds(a);
@@ -5780,38 +4897,11 @@ function addPrimitiveAtPosition(type, spawnPos) {
 }
 
 function selectPrimitive(id) {
-  // Detach group pivot if one is active
-  detachGroupTransform();
-
   selectedPrimitiveId = id;
-  selectedGroupId = null;
   if (id) {
     selectedAssetId = null;
-    selectedLightId = null;
-    selectedSceneLightId = null;
-    renderAssetsList();
-    renderLightsList();
-    renderSceneLightsList();
-    renderSceneLightProps();
   }
-  // Remove old group-details panel if showing
-  const gd = document.getElementById("group-details");
-  if (gd) gd.remove();
-
   renderPrimitivesList();
-  renderPrimitiveProps();
-  updateDetailsPanel();
-
-  const obj = id ? primitivesGroup.getObjectByName(`prim:${id}`) : null;
-  if (appMode === "edit" && obj) {
-    transformControls.attach(obj);
-    transformControls.enabled = true;
-    transformControls.visible = true;
-  } else if (!selectedAssetId && !selectedLightId) {
-    transformControls.detach();
-    transformControls.enabled = false;
-    transformControls.visible = false;
-  }
 }
 
 function getPlacementAtCrosshair({ raycastDistance = 500, fallbackDistance = 3, surfaceOffset = 0.02 } = {}) {
@@ -5911,40 +5001,6 @@ function getPlacementFromAgentView(agent, { raycastDistance = 500, fallbackDista
   };
 }
 
-const _placementGhostForward = new THREE.Vector3(0, 0, 1);
-const _placementGhostNormal = new THREE.Vector3(0, 1, 0);
-const _placementGhostQuat = new THREE.Quaternion();
-const _placementGhostPos = new THREE.Vector3();
-
-function updatePlacementGhost(nowMs) {
-  const shouldShow =
-    appMode === "edit" &&
-    !editorSimLightingPreview &&
-    !agentCameraFollow &&
-    currentWorkspace === "scene" &&
-    !!placementGhostGroup;
-  if (!shouldShow) {
-    placementGhostGroup.visible = false;
-    return;
-  }
-  if (nowMs - _placementGhostLastUpdate < 80) return;
-  _placementGhostLastUpdate = nowMs;
-
-  const placement = getPlacementAtCrosshair({ raycastDistance: 500, fallbackDistance: 3, surfaceOffset: 0.02 });
-  _placementGhostPos.set(placement.position.x, placement.position.y, placement.position.z);
-  _placementGhostNormal.set(placement.normal.x, placement.normal.y, placement.normal.z).normalize();
-  _placementGhostQuat.setFromUnitVectors(_placementGhostForward, _placementGhostNormal);
-
-  placementGhostGroup.position.copy(_placementGhostPos);
-  placementGhostGroup.quaternion.copy(_placementGhostQuat);
-  placementGhostGroup.visible = true;
-
-  const hitColor = 0x6ee7b7;
-  const fallbackColor = 0xfbbf24;
-  const c = placement.hit ? hitColor : fallbackColor;
-  placementGhostRingMat.color.setHex(c);
-  placementGhostLine.material.color.setHex(c);
-}
 
 function getSelectedPrimitive() {
   return primitives.find((p) => p.id === selectedPrimitiveId) || null;
@@ -5970,17 +5026,6 @@ function buildPrimitiveCutoutFromSource(targetId, sourceId) {
   };
 }
 
-function refreshPrimitiveSubtractUi(prim) {
-  if (!primSubtractSourceEl) return;
-  const current = primSubtractSourceEl.value;
-  const candidates = primitives.filter((p) => p.id !== prim.id);
-  primSubtractSourceEl.innerHTML =
-    `<option value="">Auto-target overlapping shapes...</option>` +
-    candidates.map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name || p.type)} (${escapeHtml(p.type)})</option>`).join("");
-  if (candidates.some((p) => p.id === current)) primSubtractSourceEl.value = current;
-  const count = Array.isArray(prim.cutouts) ? prim.cutouts.length : 0;
-  if (primSubtractCountEl) primSubtractCountEl.textContent = count ? `${count} cutout${count > 1 ? "s" : ""} applied` : "No cutouts";
-}
 
 function getOverlappingPrimitiveIds(targetId) {
   const targetMesh = primitivesGroup.getObjectByName(`prim:${targetId}`);
@@ -6031,13 +5076,9 @@ function deletePrimitive(id) {
   primitives.splice(idx, 1);
   if (selectedPrimitiveId === id) {
     selectedPrimitiveId = null;
-    transformControls?.detach();
-    transformControls.visible = false;
-    transformControls.enabled = false;
   }
   saveTagsForWorld();
   renderPrimitivesList();
-  renderPrimitiveProps();
   setStatus("Primitive deleted.");
 }
 
@@ -6065,8 +5106,7 @@ function duplicatePrimitive(id) {
 function updatePrimitiveMaterial(primId) {
   const prim = primitives.find((p) => p.id === primId);
   if (!prim) return;
-  const mesh = primitivesGroup.getObjectByName(`prim:${prim.id}`)
-    || (groupPivot ? groupPivot.getObjectByName(`prim:${prim.id}`) : null);
+  const mesh = primitivesGroup.getObjectByName(`prim:${prim.id}`);
   if (!mesh) return;
   disposePrimitiveMaterial(mesh.material);
   mesh.material = createPrimitiveMaterial(prim.material);
@@ -6076,745 +5116,15 @@ function updatePrimitiveMaterial(primId) {
 function updatePrimitiveDimensions(primId) {
   const prim = primitives.find((p) => p.id === primId);
   if (!prim) return;
-  const mesh = primitivesGroup.getObjectByName(`prim:${prim.id}`)
-    || (groupPivot ? groupPivot.getObjectByName(`prim:${prim.id}`) : null);
+  const mesh = primitivesGroup.getObjectByName(`prim:${prim.id}`);
   if (!mesh) return;
   mesh.geometry?.dispose();
   mesh.geometry = createPrimitiveGeometry(prim.type, prim.dimensions);
   rebuildPrimitiveCollider(prim.id);
 }
 
-function setGroupSelectionMode(enabled) {
-  groupSelectionMode = !!enabled;
-  if (!groupSelectionMode) {
-    multiSelectedPrimIds.clear();
-  }
-  renderPrimitivesList();
-  updateGroupActionBar();
-  setStatus(groupSelectionMode ? "Group mode on: check shapes to group." : "Group mode off.");
-}
-
 function renderPrimitivesList() {
-  if (!primitivesListEl) return;
-  primitivesListEl.innerHTML = "";
-  const validGroupIds = new Set(groups.map((g) => g.id));
-  collapsedGroupIds = new Set([...collapsedGroupIds].filter((id) => validGroupIds.has(id)));
-
-  // Gather IDs of primitives that belong to a group
-  const groupedIds = new Set();
-  for (const g of groups) {
-    for (const cid of g.children) groupedIds.add(cid);
-  }
-
-  // Helper: build a primitive list item with multi-select support
-  function makePrimItem(p, extraClass = "") {
-    const isSelected = p.id === selectedPrimitiveId;
-    const isMultiSelected = multiSelectedPrimIds.has(p.id);
-    const el = document.createElement("div");
-    el.className = "tag-item" + extraClass + (isSelected ? " active" : "") + (isMultiSelected ? " multi-selected" : "");
-    if (groupSelectionMode) {
-      el.innerHTML = `
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;width:100%;">
-          <input data-group-select-checkbox type="checkbox" ${isMultiSelected ? "checked" : ""} />
-          <span style="display:flex;flex-direction:column;min-width:0;">
-            <span>${escapeHtml(p.name || p.type)}</span>
-            <small>${escapeHtml(p.type)}</small>
-          </span>
-        </label>
-      `;
-      const cb = el.querySelector("input[data-group-select-checkbox]");
-      cb?.addEventListener("click", (e) => e.stopPropagation());
-      cb?.addEventListener("change", (e) => {
-        e.stopPropagation();
-        if (cb.checked) multiSelectedPrimIds.add(p.id);
-        else multiSelectedPrimIds.delete(p.id);
-        renderPrimitivesList();
-        updateGroupActionBar();
-      });
-    } else {
-    el.innerHTML = `${escapeHtml(p.name || p.type)}<small>${escapeHtml(p.type)}</small>`;
-    }
-    el.addEventListener("click", (e) => {
-      if (groupSelectionMode) {
-        e.stopPropagation();
-        if (multiSelectedPrimIds.has(p.id)) multiSelectedPrimIds.delete(p.id);
-        else multiSelectedPrimIds.add(p.id);
-        renderPrimitivesList();
-        updateGroupActionBar();
-        return;
-      }
-      if (e.shiftKey) {
-        // Shift+click toggles multi-selection
-        e.stopPropagation();
-        if (multiSelectedPrimIds.has(p.id)) {
-          multiSelectedPrimIds.delete(p.id);
-        } else {
-          multiSelectedPrimIds.add(p.id);
-        }
-        // Also include the currently selected prim if there is one
-        if (selectedPrimitiveId && !multiSelectedPrimIds.has(selectedPrimitiveId)) {
-          multiSelectedPrimIds.add(selectedPrimitiveId);
-        }
-        renderPrimitivesList();
-        updateGroupActionBar();
-      } else {
-        // Normal click: clear multi-select, select this one
-        multiSelectedPrimIds.clear();
-        selectPrimitive(p.id);
-        updateGroupActionBar();
-      }
-    });
-    return el;
-  }
-
-  // Render groups first
-  for (const g of groups) {
-    const gEl = document.createElement("div");
-    gEl.className = "ol-group" + (g.id === selectedGroupId ? " active" : "");
-
-    // Group header row
-    const header = document.createElement("div");
-    header.className = "ol-group-header";
-    const isCollapsed = collapsedGroupIds.has(g.id);
-    header.innerHTML = `<button type="button" class="ol-group-collapse-btn" title="${isCollapsed ? "Expand group" : "Collapse group"}">${isCollapsed ? "▸" : "▾"}</button><span class="ol-group-icon">📁</span><span class="ol-group-name">${escapeHtml(g.name)}</span>${g.pickable ? `<span class="ol-group-pickable" title="Pickable group">🖐</span>` : ""}<span class="ol-group-count">${g.children.length}</span>`;
-    header.addEventListener("click", (e) => {
-      e.stopPropagation();
-      multiSelectedPrimIds.clear();
-      selectGroup(g.id);
-      updateGroupActionBar();
-    });
-    const collapseBtn = header.querySelector(".ol-group-collapse-btn");
-    collapseBtn?.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (collapsedGroupIds.has(g.id)) collapsedGroupIds.delete(g.id);
-      else collapsedGroupIds.add(g.id);
-      renderPrimitivesList();
-    });
-
-    // Action buttons
-    const actions = document.createElement("span");
-    actions.className = "ol-group-actions";
-    const dupBtn = document.createElement("button");
-    dupBtn.className = "ol-group-btn";
-    dupBtn.textContent = "Dup";
-    dupBtn.title = "Duplicate group";
-    dupBtn.addEventListener("click", (e) => { e.stopPropagation(); duplicateGroup(g.id); });
-    const ungroupBtn = document.createElement("button");
-    ungroupBtn.className = "ol-group-btn";
-    ungroupBtn.textContent = "✕";
-    ungroupBtn.title = "Ungroup";
-    ungroupBtn.addEventListener("click", (e) => { e.stopPropagation(); ungroupGroup(g.id); });
-    actions.appendChild(dupBtn);
-    actions.appendChild(ungroupBtn);
-    header.appendChild(actions);
-    gEl.appendChild(header);
-
-    // Group children
-    const childList = document.createElement("div");
-    childList.className = "ol-group-children";
-    if (isCollapsed) childList.classList.add("hidden");
-    for (const cid of g.children) {
-      const p = primitives.find((pr) => pr.id === cid);
-      if (!p) continue;
-      childList.appendChild(makePrimItem(p, " ol-group-child"));
-    }
-    gEl.appendChild(childList);
-    primitivesListEl.appendChild(gEl);
-  }
-
-  // Render ungrouped primitives
-  for (const p of primitives) {
-    if (groupedIds.has(p.id)) continue;
-    primitivesListEl.appendChild(makePrimItem(p));
-  }
-
-  updateOutlinerCounts();
-  updateGroupActionBar();
-}
-
-// ---- Group action bar (shown when multi-selecting) ----
-
-function updateGroupActionBar() {
-  let bar = document.getElementById("group-action-bar");
-  const host = primitivesListEl?.parentElement;
-  if (!host) return;
-    if (!bar) {
-      bar = document.createElement("div");
-      bar.id = "group-action-bar";
-      bar.className = "ol-group-action-bar";
-    host.insertBefore(bar, primitivesListEl);
-    }
-  if (!groupSelectionMode) {
-    bar.innerHTML = `
-      <span class="ol-group-action-label">Grouping</span>
-      <button id="group-mode-toggle-btn" class="ol-group-action-btn" type="button">Group Objects</button>
-    `;
-    bar.querySelector("#group-mode-toggle-btn")?.addEventListener("click", () => {
-      setGroupSelectionMode(true);
-    });
-    return;
-  }
-  bar.innerHTML = `
-    <span class="ol-group-action-label">${multiSelectedPrimIds.size} selected</span>
-    <button id="group-create-btn" class="ol-group-action-btn" type="button" ${multiSelectedPrimIds.size < 2 ? "disabled" : ""}>Group Selected</button>
-    <button id="group-clear-btn" class="ol-group-action-btn ol-group-cancel-btn" type="button">Clear</button>
-    <button id="group-done-btn" class="ol-group-action-btn" type="button">Done</button>
-  `;
-  bar.querySelector("#group-create-btn")?.addEventListener("click", () => {
-      createGroupFromSelection();
-    });
-  bar.querySelector("#group-clear-btn")?.addEventListener("click", () => {
-      multiSelectedPrimIds.clear();
-      renderPrimitivesList();
-      updateGroupActionBar();
-    });
-  bar.querySelector("#group-done-btn")?.addEventListener("click", () => {
-    setGroupSelectionMode(false);
-  });
-}
-
-function createGroupFromSelection() {
-  if (multiSelectedPrimIds.size < 2) return;
-  const children = [...multiSelectedPrimIds];
-
-  // Remove these from any existing groups first
-  for (const g of groups) {
-    g.children = g.children.filter((cid) => !multiSelectedPrimIds.has(cid));
-  }
-  // Remove empty groups
-  groups = groups.filter((g) => g.children.length > 0);
-
-  // Derive a name from the shared prefix or just use "Group"
-  const names = children.map((id) => {
-    const p = primitives.find((pr) => pr.id === id);
-    return p?.name || "";
-  });
-  // Try to find a common prefix
-  let groupName = "Group";
-  if (names.length > 0 && names[0]) {
-    const words = names[0].split(/[\s\-_]+/);
-    for (let len = words.length; len >= 1; len--) {
-      const prefix = words.slice(0, len).join(" ");
-      if (names.every((n) => n.startsWith(prefix) || n.toLowerCase().startsWith(prefix.toLowerCase()))) {
-        groupName = prefix.trim();
-        break;
-      }
-    }
-  }
-  if (!groupName || groupName.length < 2) groupName = "Group";
-
-  const newGroup = {
-    id: randId(),
-    name: groupName,
-    children,
-    pickable: false,
-  };
-  groups.push(newGroup);
-
-  multiSelectedPrimIds.clear();
-  saveTagsForWorld();
-  renderPrimitivesList();
-  updateGroupActionBar();
-  selectGroup(newGroup.id);
-  setStatus(`Created group "${newGroup.name}" with ${children.length} shapes.`);
-}
-
-// ---- Group management ----
-
-function selectGroup(id) {
-  // Detach any previously active group pivot
-  detachGroupTransform();
-
-  selectedGroupId = id;
-  selectedPrimitiveId = null;
-  selectedAssetId = null;
-  selectedLightId = null;
-  selectedSceneLightId = null;
-
-  if (id) {
-    attachGroupTransform(id);
-  }
-
-  renderPrimitivesList();
-  renderAssetsList();
-  renderLightsList();
-  renderSceneLightsList();
-  renderPrimitiveProps();
-  renderLightProps();
-  renderSceneLightProps();
-  updateGroupDetailsPanel();
-  populateTransformInputs();
-}
-
-// --- Group pivot transform system ---
-
-function attachGroupTransform(groupId) {
-  const g = groups.find((gr) => gr.id === groupId);
-  if (!g || g.children.length === 0) return;
-
-  // Find all child meshes and compute centroid
-  groupChildMeshes = [];
-  let cx = 0, cy = 0, cz = 0;
-  for (const cid of g.children) {
-    const mesh = primitivesGroup.getObjectByName(`prim:${cid}`);
-    if (mesh) {
-      groupChildMeshes.push(mesh);
-      cx += mesh.position.x;
-      cy += mesh.position.y;
-      cz += mesh.position.z;
-    }
-  }
-  if (groupChildMeshes.length === 0) return;
-  cx /= groupChildMeshes.length;
-  cy /= groupChildMeshes.length;
-  cz /= groupChildMeshes.length;
-
-  // Create pivot at centroid
-  groupPivot = new THREE.Object3D();
-  groupPivot.name = "groupPivot";
-  groupPivot.position.set(cx, cy, cz);
-  scene.add(groupPivot);
-
-  // Reparent children to pivot (preserving world transform)
-  for (const mesh of groupChildMeshes) {
-    groupPivot.attach(mesh);
-  }
-
-  // Attach transform controls to pivot
-  if (appMode === "edit") {
-    transformControls.attach(groupPivot);
-    transformControls.enabled = true;
-    transformControls.visible = true;
-  }
-}
-
-function detachGroupTransform() {
-  if (!groupPivot) return;
-
-  // Persist final world transforms to data model before detaching
-  persistGroupTransforms();
-
-  // Reparent children back to primitivesGroup (preserving world transform)
-  for (const mesh of groupChildMeshes) {
-    primitivesGroup.attach(mesh);
-  }
-
-  // Clean up pivot
-  scene.remove(groupPivot);
-  groupPivot = null;
-  groupChildMeshes = [];
-}
-
-function persistGroupTransforms() {
-  if (!groupPivot) return;
-  const g = groups.find((gr) => gr.id === selectedGroupId);
-  if (!g) return;
-
-  const wp = new THREE.Vector3();
-  const wq = new THREE.Quaternion();
-  const ws = new THREE.Vector3();
-
-  for (const cid of g.children) {
-    const prim = primitives.find((p) => p.id === cid);
-    const mesh = groupPivot.getObjectByName(`prim:${cid}`);
-    if (!prim || !mesh) continue;
-
-    mesh.getWorldPosition(wp);
-    mesh.getWorldQuaternion(wq);
-    mesh.getWorldScale(ws);
-    const euler = new THREE.Euler().setFromQuaternion(wq);
-
-    prim.transform = {
-      position: { x: wp.x, y: wp.y, z: wp.z },
-      rotation: { x: euler.x, y: euler.y, z: euler.z },
-      scale: { x: ws.x, y: ws.y, z: ws.z },
-    };
-  }
-}
-
-function persistGroupTransformsAndRebuild() {
-  persistGroupTransforms();
-  saveTagsForWorld();
-  const g = groups.find((gr) => gr.id === selectedGroupId);
-  if (g) {
-    for (const cid of g.children) {
-      const prim = primitives.find((p) => p.id === cid);
-      if (prim) rebuildPrimitiveColliderSync(prim);
-    }
-  }
-}
-
-function applyGroupCastShadow(groupId, enabled) {
-  const g = groups.find((gr) => gr.id === groupId);
-  if (!g) return;
-  for (const cid of g.children || []) {
-    const prim = primitives.find((p) => p.id === cid);
-    if (!prim) continue;
-    prim.castShadow = !!enabled;
-    const mesh = primitivesGroup.getObjectByName(`prim:${cid}`);
-    if (mesh) mesh.castShadow = !!enabled;
-  }
-}
-
-function inferGroupCastShadow(groupId) {
-  const g = groups.find((gr) => gr.id === groupId);
-  if (!g || !Array.isArray(g.children) || g.children.length === 0) return true;
-  for (const cid of g.children) {
-    const prim = primitives.find((p) => p.id === cid);
-    if (!prim || prim.castShadow === false) return false;
-  }
-  return true;
-}
-
-function updateGroupDetailsPanel() {
-  const g = groups.find((gr) => gr.id === selectedGroupId);
-
-  // Remove old group details if any
-  const existing = document.getElementById("group-details");
-  if (existing) existing.remove();
-
-  if (!g) {
-    // Make sure regular details panel reflects actual selection
-    updateDetailsPanel();
-    return;
-  }
-
-  // Show details panel with group info
-  if (detailsPanelEl) detailsPanelEl.classList.remove("hidden");
-  if (detailsTitleEl) detailsTitleEl.textContent = `Group: ${g.name}`;
-
-  // Hide other detail sections
-  const tagForm = document.getElementById("tag-form");
-  const assetDets = document.getElementById("asset-details");
-  const primProps = document.getElementById("prim-props");
-  const lightProps = document.getElementById("light-props");
-  const slProps = document.getElementById("scene-light-props");
-  if (tagForm) tagForm.classList.add("hidden");
-  if (assetDets) assetDets.classList.add("hidden");
-  if (primProps) primProps.classList.add("hidden");
-  if (lightProps) lightProps.classList.add("hidden");
-  if (slProps) slProps.classList.add("hidden");
-
-  // Create group details panel
-  const gd = document.createElement("div");
-  gd.id = "group-details";
-  gd.className = "prim-props";
-  // Sample first child's material for initial slider values
-  const firstChild = primitives.find((p) => g.children.includes(p.id));
-  const fm = firstChild?.material || {};
-
-  gd.innerHTML = `
-    <details class="dt-section" open>
-      <summary class="dt-header">Group</summary>
-      <div class="dt-body">
-        <input id="group-name-input" type="text" value="${escapeHtml(g.name)}" class="dt-input" placeholder="Group name" />
-        <div style="font-size:12px; color:var(--text-tertiary); margin:6px 0;">${g.children.length} shapes in this group</div>
-        <label class="prop-check"><input id="group-cast-shadow" type="checkbox" ${inferGroupCastShadow(g.id) ? "checked" : ""} /><span>Cast Shadow (all shapes)</span></label>
-        <label class="prop-check"><input id="group-pickable" type="checkbox" ${g.pickable ? "checked" : ""} /><span>Pickable</span></label>
-        <div class="dt-actions">
-          <button id="group-dup-btn" class="tb-btn tb-primary" type="button">Duplicate Group</button>
-          <button id="group-ungroup-btn" class="tb-btn tb-danger" type="button">Ungroup</button>
-        </div>
-      </div>
-    </details>
-    <details class="dt-section" open>
-      <summary class="dt-header">Group Material</summary>
-      <div class="dt-body">
-        <div style="font-size:11px;color:var(--text-tertiary);margin-bottom:6px;">Changes apply to all ${g.children.length} shapes.</div>
-        <div style="font-size:12px;font-weight:600;margin-bottom:4px;">Presets</div>
-        <div class="dt-actions" style="flex-wrap:wrap;gap:5px;margin-bottom:8px;">
-          ${["plastic","ceramic","rubber","fabric","velvet","cushion","glass","mirror","metal","concrete"].map(
-            (p) => `<button data-grp-preset="${p}" class="tb-btn tb-muted" type="button">${p.charAt(0).toUpperCase() + p.slice(1)}</button>`
-          ).join("")}
-        </div>
-        <div class="dt-row"><label class="prop-label">Color</label><input id="grp-color" type="color" value="${fm.color || "#808080"}" /></div>
-        <div class="slider"><span class="slider-label">Softness</span><input id="grp-roughness" type="range" min="0" max="1" step="0.05" value="${fm.softness ?? fm.roughness ?? 0.7}" /><span id="grp-roughness-val" class="slider-value">${(fm.softness ?? fm.roughness ?? 0.7).toFixed(2)}</span></div>
-        <div class="slider"><span class="slider-label">Hardness</span><input id="grp-hardness" type="range" min="0" max="1" step="0.01" value="${fm.hardness ?? 0}" /><span id="grp-hardness-val" class="slider-value">${(fm.hardness ?? 0).toFixed(2)}</span></div>
-        <div class="slider"><span class="slider-label">Fluffiness</span><input id="grp-fluffiness" type="range" min="0" max="1" step="0.01" value="${fm.fluffiness ?? 0}" /><span id="grp-fluffiness-val" class="slider-value">${(fm.fluffiness ?? 0).toFixed(2)}</span></div>
-        <div class="slider"><span class="slider-label">Metal Look</span><input id="grp-metalness" type="range" min="0" max="1" step="0.05" value="${fm.metalness ?? 0}" /><span id="grp-metalness-val" class="slider-value">${(fm.metalness ?? 0).toFixed(2)}</span></div>
-        <div class="slider"><span class="slider-label">Transparency</span><input id="grp-opacity" type="range" min="0.05" max="1" step="0.01" value="${fm.opacity ?? 1}" /><span id="grp-opacity-val" class="slider-value">${(fm.opacity ?? 1).toFixed(2)}</span></div>
-        <div class="slider"><span class="slider-label">Glassiness</span><input id="grp-transmission" type="range" min="0" max="1" step="0.01" value="${fm.transmission ?? 0}" /><span id="grp-transmission-val" class="slider-value">${(fm.transmission ?? 0).toFixed(2)}</span></div>
-        <div class="dt-row"><label class="prop-label">Glow Color</label><input id="grp-emissive" type="color" value="${fm.emissive || "#000000"}" /></div>
-        <div class="slider"><span class="slider-label">Glow Strength</span><input id="grp-emissive-intensity" type="range" min="0" max="5" step="0.05" value="${fm.emissiveIntensity ?? 0}" /><span id="grp-emissive-intensity-val" class="slider-value">${(fm.emissiveIntensity ?? 0).toFixed(2)}</span></div>
-        <div class="dt-row"><label class="prop-label">Texture</label>
-          <label class="tb-btn tb-muted tb-file-label"><input id="grp-texture" type="file" accept="image/*" /><span id="grp-texture-label">${fm.textureDataUrl ? "Change" : "Upload"}</span></label>
-          <button id="grp-texture-clear" type="button" class="tb-btn tb-muted">Clear</button>
-        </div>
-      </div>
-    </details>
-  `;
-  detailsPanelEl.appendChild(gd);
-
-  // Helper: apply a material change to all children in the group
-  function applyToGroupMaterial(mutator) {
-    for (const cid of g.children) {
-      const prim = primitives.find((p) => p.id === cid);
-      if (!prim) continue;
-      if (!prim.material) prim.material = {};
-      mutator(prim.material);
-      updatePrimitiveMaterial(prim.id);
-    }
-    saveTagsForWorld();
-  }
-
-  // Wire group events
-  gd.querySelector("#group-name-input").addEventListener("change", (e) => {
-    g.name = e.target.value.trim() || g.name;
-    saveTagsForWorld();
-    renderPrimitivesList();
-    if (detailsTitleEl) detailsTitleEl.textContent = `Group: ${g.name}`;
-  });
-  gd.querySelector("#group-cast-shadow")?.addEventListener("change", (e) => {
-    applyGroupCastShadow(g.id, !!e.target.checked);
-    saveTagsForWorld();
-    setStatus(`Group shadows ${e.target.checked ? "enabled" : "disabled"}.`);
-  });
-  gd.querySelector("#group-pickable")?.addEventListener("change", (e) => {
-    g.pickable = !!e.target.checked;
-    saveTagsForWorld();
-    setStatus(`Group pickable ${g.pickable ? "enabled" : "disabled"}.`);
-  });
-  gd.querySelector("#group-dup-btn").addEventListener("click", () => duplicateGroup(g.id));
-  gd.querySelector("#group-ungroup-btn").addEventListener("click", () => ungroupGroup(g.id));
-
-  // Wire preset buttons
-  gd.querySelectorAll("button[data-grp-preset]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const preset = PRIMITIVE_MATERIAL_PRESETS[btn.getAttribute("data-grp-preset")];
-      if (!preset) return;
-      applyToGroupMaterial((mat) => {
-        if (preset.softness !== undefined) { mat.softness = preset.softness; mat.roughness = preset.softness; }
-        if (preset.hardness !== undefined) mat.hardness = preset.hardness;
-        if (preset.fluffiness !== undefined) mat.fluffiness = preset.fluffiness;
-        if (preset.metalness !== undefined) mat.metalness = preset.metalness;
-        if (preset.transparency !== undefined) mat.opacity = preset.transparency;
-        if (preset.transmission !== undefined) mat.transmission = preset.transmission;
-        if (preset.clearcoat !== undefined) mat.clearcoat = preset.clearcoat;
-        if (preset.clearcoatRoughness !== undefined) mat.clearcoatRoughness = preset.clearcoatRoughness;
-        if (preset.emissive) mat.emissive = preset.emissive;
-        if (preset.emissiveIntensity !== undefined) mat.emissiveIntensity = preset.emissiveIntensity;
-        if (preset.specularIntensity !== undefined) mat.specularIntensity = preset.specularIntensity;
-        if (preset.envMapIntensity !== undefined) mat.envMapIntensity = preset.envMapIntensity;
-        if (preset.ior !== undefined) mat.ior = preset.ior;
-        if (preset.thickness !== undefined) mat.thickness = preset.thickness;
-      });
-      updateGroupDetailsPanel();
-      setStatus(`Applied "${btn.getAttribute("data-grp-preset")}" to group.`);
-    });
-  });
-
-  // Wire material sliders
-  const sliderBindings = [
-    ["grp-roughness", "grp-roughness-val", (v, m) => { m.softness = v; m.roughness = v; }],
-    ["grp-hardness", "grp-hardness-val", (v, m) => { m.hardness = v; }],
-    ["grp-fluffiness", "grp-fluffiness-val", (v, m) => { m.fluffiness = v; }],
-    ["grp-metalness", "grp-metalness-val", (v, m) => { m.metalness = v; }],
-    ["grp-opacity", "grp-opacity-val", (v, m) => { m.opacity = v; }],
-    ["grp-transmission", "grp-transmission-val", (v, m) => { m.transmission = v; }],
-    ["grp-emissive-intensity", "grp-emissive-intensity-val", (v, m) => { m.emissiveIntensity = v; }],
-  ];
-  for (const [inputId, valId, setter] of sliderBindings) {
-    const input = gd.querySelector(`#${inputId}`);
-    const valEl = gd.querySelector(`#${valId}`);
-    input?.addEventListener("input", () => {
-      const v = parseFloat(input.value);
-      if (valEl) valEl.textContent = v.toFixed(2);
-      applyToGroupMaterial((m) => setter(v, m));
-    });
-  }
-
-  // Wire color pickers
-  gd.querySelector("#grp-color")?.addEventListener("input", (e) => {
-    applyToGroupMaterial((m) => { m.color = e.target.value; });
-  });
-  gd.querySelector("#grp-emissive")?.addEventListener("input", (e) => {
-    applyToGroupMaterial((m) => { m.emissive = e.target.value; });
-  });
-
-  // Wire texture upload
-  gd.querySelector("#grp-texture")?.addEventListener("change", (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      applyToGroupMaterial((m) => { m.textureDataUrl = reader.result; });
-      const label = gd.querySelector("#grp-texture-label");
-      if (label) label.textContent = "Change";
-    };
-    reader.readAsDataURL(file);
-  });
-  gd.querySelector("#grp-texture-clear")?.addEventListener("click", () => {
-    applyToGroupMaterial((m) => { m.textureDataUrl = null; });
-    const label = gd.querySelector("#grp-texture-label");
-    if (label) label.textContent = "Upload";
-  });
-}
-
-function duplicateGroup(groupId) {
-  const g = groups.find((gr) => gr.id === groupId);
-  if (!g) return;
-
-  // Compute bounding center of the group for offset
-  let cx = 0, cz = 0, count = 0;
-  for (const cid of g.children) {
-    const p = primitives.find((pr) => pr.id === cid);
-    if (p?.transform?.position) { cx += p.transform.position.x; cz += p.transform.position.z; count++; }
-  }
-  if (count > 0) { cx /= count; cz /= count; }
-
-  const newChildren = [];
-  const offset = 2.0; // Offset duplicated group 2m along X
-
-  for (const cid of g.children) {
-    const src = primitives.find((pr) => pr.id === cid);
-    if (!src) continue;
-    const { _colliderHandle, ...serializable } = src;
-    const clone = JSON.parse(JSON.stringify(serializable));
-    clone.id = randId();
-    clone.name = src.name;
-    clone._colliderHandle = null;
-    if (clone.transform?.position) {
-      clone.transform.position.x += offset;
-    }
-    primitives.push(clone);
-    instantiatePrimitive(clone);
-    newChildren.push(clone.id);
-  }
-
-  const newGroup = {
-    id: randId(),
-    name: g.name + " copy",
-    children: newChildren,
-    pickable: !!g.pickable,
-  };
-  groups.push(newGroup);
-  saveTagsForWorld();
-  renderPrimitivesList();
-  selectGroup(newGroup.id);
-  setStatus(`Duplicated group "${g.name}" (${newChildren.length} shapes).`);
-}
-
-function ungroupGroup(groupId) {
-  const idx = groups.findIndex((gr) => gr.id === groupId);
-  if (idx === -1) return;
-  const name = groups[idx].name;
-  groups.splice(idx, 1);
-  if (selectedGroupId === groupId) selectedGroupId = null;
-  saveTagsForWorld();
-  renderPrimitivesList();
-  updateDetailsPanel();
-  setStatus(`Ungrouped "${name}".`);
-}
-
-function renderPrimitiveProps() {
-  const prim = getSelectedPrimitive();
-  if (primPropsEl) primPropsEl.classList.toggle("hidden", !prim);
-  if (!prim) return;
-
-  if (primNameEl) primNameEl.value = prim.name || "";
-  if (primNotesEl) primNotesEl.value = prim.notes || "";
-  if (primTagsInputEl) primTagsInputEl.value = (prim.tags || []).join(", ");
-  if (primStateEl) primStateEl.value = prim.state || "static";
-  if (primColorEl) primColorEl.value = prim.material?.color || "#808080";
-  const softness = prim.material?.softness ?? prim.material?.roughness ?? 0.7;
-  if (primRoughnessEl) primRoughnessEl.value = String(softness);
-  if (primRoughnessValEl) primRoughnessValEl.textContent = softness.toFixed(2);
-  if (primHardnessEl) primHardnessEl.value = String(prim.material?.hardness ?? 0.0);
-  if (primHardnessValEl) primHardnessValEl.textContent = (prim.material?.hardness ?? 0.0).toFixed(2);
-  if (primFluffinessEl) primFluffinessEl.value = String(prim.material?.fluffiness ?? 0.0);
-  if (primFluffinessValEl) primFluffinessValEl.textContent = (prim.material?.fluffiness ?? 0.0).toFixed(2);
-  if (primMetalnessEl) primMetalnessEl.value = String(prim.material?.metalness ?? 0.0);
-  if (primMetalnessValEl) primMetalnessValEl.textContent = (prim.material?.metalness ?? 0.0).toFixed(2);
-  if (primSpecularIntensityEl) primSpecularIntensityEl.value = String(prim.material?.specularIntensity ?? 1.0);
-  if (primSpecularIntensityValEl) primSpecularIntensityValEl.textContent = (prim.material?.specularIntensity ?? 1.0).toFixed(2);
-  if (primSpecularColorEl) primSpecularColorEl.value = prim.material?.specularColor || "#ffffff";
-  if (primEnvIntensityEl) primEnvIntensityEl.value = String(prim.material?.envMapIntensity ?? 1.0);
-  if (primEnvIntensityValEl) primEnvIntensityValEl.textContent = (prim.material?.envMapIntensity ?? 1.0).toFixed(2);
-  if (primOpacityEl) primOpacityEl.value = String(prim.material?.opacity ?? 1.0);
-  if (primOpacityValEl) primOpacityValEl.textContent = (prim.material?.opacity ?? 1.0).toFixed(2);
-  if (primTransmissionEl) primTransmissionEl.value = String(prim.material?.transmission ?? 0.0);
-  if (primTransmissionValEl) primTransmissionValEl.textContent = (prim.material?.transmission ?? 0.0).toFixed(2);
-  if (primIorEl) primIorEl.value = String(prim.material?.ior ?? 1.45);
-  if (primIorValEl) primIorValEl.textContent = (prim.material?.ior ?? 1.45).toFixed(2);
-  if (primThicknessEl) primThicknessEl.value = String(prim.material?.thickness ?? 0.0);
-  if (primThicknessValEl) primThicknessValEl.textContent = (prim.material?.thickness ?? 0.0).toFixed(2);
-  if (primAttenuationColorEl) primAttenuationColorEl.value = prim.material?.attenuationColor || "#ffffff";
-  if (primAttenuationDistanceEl) primAttenuationDistanceEl.value = String(prim.material?.attenuationDistance ?? 1.0);
-  if (primAttenuationDistanceValEl) primAttenuationDistanceValEl.textContent = (prim.material?.attenuationDistance ?? 1.0).toFixed(2);
-  if (primIridescenceEl) primIridescenceEl.value = String(prim.material?.iridescence ?? 0.0);
-  if (primIridescenceValEl) primIridescenceValEl.textContent = (prim.material?.iridescence ?? 0.0).toFixed(2);
-  if (primEmissiveColorEl) primEmissiveColorEl.value = prim.material?.emissive || "#000000";
-  if (primEmissiveIntensityEl) primEmissiveIntensityEl.value = String(prim.material?.emissiveIntensity ?? 0.0);
-  if (primEmissiveIntensityValEl) primEmissiveIntensityValEl.textContent = (prim.material?.emissiveIntensity ?? 0.0).toFixed(2);
-  if (primClearcoatEl) primClearcoatEl.value = String(prim.material?.clearcoat ?? 0.0);
-  if (primClearcoatValEl) primClearcoatValEl.textContent = (prim.material?.clearcoat ?? 0.0).toFixed(2);
-  if (primClearcoatRoughnessEl) primClearcoatRoughnessEl.value = String(prim.material?.clearcoatRoughness ?? 0.0);
-  if (primClearcoatRoughnessValEl) primClearcoatRoughnessValEl.textContent = (prim.material?.clearcoatRoughness ?? 0.0).toFixed(2);
-  if (primAlphaCutoffEl) primAlphaCutoffEl.value = String(prim.material?.alphaCutoff ?? 0.0);
-  if (primAlphaCutoffValEl) primAlphaCutoffValEl.textContent = (prim.material?.alphaCutoff ?? 0.0).toFixed(2);
-  if (primTextureSoftnessEl) primTextureSoftnessEl.value = String(prim.material?.textureSoftness ?? 0.25);
-  if (primTextureSoftnessValEl) primTextureSoftnessValEl.textContent = (prim.material?.textureSoftness ?? 0.25).toFixed(2);
-  if (primTextureHardnessEl) primTextureHardnessEl.value = String(prim.material?.textureHardness ?? 0.5);
-  if (primTextureHardnessValEl) primTextureHardnessValEl.textContent = (prim.material?.textureHardness ?? 0.5).toFixed(2);
-  const uv = prim.material?.uvTransform || {};
-  if (primUvRepeatXEl) primUvRepeatXEl.value = String(uv.repeatX ?? 1);
-  if (primUvRepeatXValEl) primUvRepeatXValEl.textContent = Number(uv.repeatX ?? 1).toFixed(2);
-  if (primUvRepeatYEl) primUvRepeatYEl.value = String(uv.repeatY ?? 1);
-  if (primUvRepeatYValEl) primUvRepeatYValEl.textContent = Number(uv.repeatY ?? 1).toFixed(2);
-  if (primUvOffsetXEl) primUvOffsetXEl.value = String(uv.offsetX ?? 0);
-  if (primUvOffsetXValEl) primUvOffsetXValEl.textContent = Number(uv.offsetX ?? 0).toFixed(2);
-  if (primUvOffsetYEl) primUvOffsetYEl.value = String(uv.offsetY ?? 0);
-  if (primUvOffsetYValEl) primUvOffsetYValEl.textContent = Number(uv.offsetY ?? 0).toFixed(2);
-  if (primUvRotationEl) primUvRotationEl.value = String(uv.rotationDeg ?? 0);
-  if (primUvRotationValEl) primUvRotationValEl.textContent = String(Math.round(Number(uv.rotationDeg ?? 0)));
-  if (primDoubleSidedEl) primDoubleSidedEl.checked = prim.material?.doubleSided !== false;
-  if (primFlatShadingEl) primFlatShadingEl.checked = prim.material?.flatShading === true;
-  if (primWireframeEl) primWireframeEl.checked = prim.material?.wireframe === true;
-  if (primPhysicsEl) primPhysicsEl.checked = prim.physics !== false;
-  if (primCastShadowEl) primCastShadowEl.checked = prim.castShadow !== false;
-  if (primReceiveShadowEl) primReceiveShadowEl.checked = prim.receiveShadow !== false;
-  if (primTextureLabelEl) primTextureLabelEl.textContent = prim.material?.textureDataUrl ? "Change" : "Upload";
-
-  // Render dimension inputs based on type
-  if (primDimsContainerEl) {
-    const dims = prim.dimensions || {};
-    let html = "";
-    const fields = Object.keys(PRIMITIVE_DEFAULTS[prim.type] || {});
-    for (const key of fields) {
-      const val = dims[key] ?? PRIMITIVE_DEFAULTS[prim.type][key] ?? 1;
-      const label = getPrimitiveDimLabel(key);
-      const cfg = PRIMITIVE_DIM_CONFIG[key] || { min: 0.05, max: 20, step: 0.05 };
-      const valueText = formatPrimitiveDimValue(key, Number(val) || 0);
-      html += `<div class="slider"><span class="slider-label">${escapeHtml(label)}</span>
-        <input data-dim="${escapeHtml(key)}" type="range" min="${cfg.min}" max="${cfg.max}" step="${cfg.step}" value="${val}" />
-        <span class="slider-value">${escapeHtml(valueText)}</span></div>`;
-    }
-    primDimsContainerEl.innerHTML = html;
-  }
-
-  // Render metadata key-value pairs
-  renderPrimitiveMetadata(prim);
-  refreshPrimitiveSubtractUi(prim);
-}
-
-function renderPrimitiveMetadata(prim) {
-  if (!primMetaListEl) return;
-  const meta = prim.metadata || {};
-  const keys = Object.keys(meta);
-  if (keys.length === 0) {
-    primMetaListEl.innerHTML = '<div class="meta-kv-empty">No custom fields</div>';
-    return;
-  }
-  primMetaListEl.innerHTML = keys
-    .map(
-      (k) =>
-        `<div class="meta-kv-row" data-mk="${escapeHtml(k)}">
-          <input class="meta-kv-key" data-field="key" type="text" value="${escapeHtml(k)}" placeholder="key" />
-          <input class="meta-kv-val" data-field="val" type="text" value="${escapeHtml(String(meta[k] ?? ""))}" placeholder="value" />
-          <button data-action="remove-meta" type="button" class="btn-sm danger" title="Remove">×</button>
-        </div>`
-    )
-    .join("");
+  // No-op in sim-only mode (editor primitives list not present)
 }
 
 function rebuildAllPrimitives() {
@@ -6842,121 +5152,6 @@ function rebuildAllPrimitives() {
 // =============================================================================
 // EDITOR LIGHTS – User-placed lights with visible proxy icons
 // =============================================================================
-
-// Shared geometries for the light icon proxy (created once, reused)
-let _lightBulbGeom = null;
-let _lightConeGeom = null;
-let _lightRaysGeom = null;
-
-function getLightIconGeometries() {
-  if (!_lightBulbGeom) {
-    _lightBulbGeom = new THREE.SphereGeometry(0.12, 12, 8);
-    _lightConeGeom = new THREE.ConeGeometry(0.10, 0.22, 8);
-    _lightConeGeom.translate(0, -0.22, 0);
-    // Small lines radiating out to make it look like a bulb emitting light
-    const pts = [];
-    for (let i = 0; i < 6; i++) {
-      const a = (i / 6) * Math.PI * 2;
-      const cx = Math.cos(a);
-      const cz = Math.sin(a);
-      pts.push(new THREE.Vector3(cx * 0.15, 0, cz * 0.15));
-      pts.push(new THREE.Vector3(cx * 0.28, 0, cz * 0.28));
-    }
-    _lightRaysGeom = new THREE.BufferGeometry().setFromPoints(pts);
-  }
-  return { bulb: _lightBulbGeom, cone: _lightConeGeom, rays: _lightRaysGeom };
-}
-
-function createLightProxy(lightData) {
-  const geos = getLightIconGeometries();
-  const color = new THREE.Color(lightData.color || "#ffffff");
-  const emissive = color.clone();
-
-  // Build a small group that looks like a light bulb
-  const proxy = new THREE.Group();
-  proxy.name = `lightProxy:${lightData.id}`;
-  proxy.userData.editorLightId = lightData.id;
-  proxy.userData.isLightProxy = true;
-
-  // Glowing bulb sphere
-  const bulb = new THREE.Mesh(
-    geos.bulb,
-    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95 })
-  );
-  bulb.userData.editorLightId = lightData.id;
-  proxy.add(bulb);
-
-  // Colored emission halo (slightly bigger, translucent)
-  const halo = new THREE.Mesh(
-    new THREE.SphereGeometry(0.18, 12, 8),
-    new THREE.MeshBasicMaterial({ color: emissive, transparent: true, opacity: 0.35, depthWrite: false })
-  );
-  halo.userData.editorLightId = lightData.id;
-  proxy.add(halo);
-
-  // Direction cone (points along -Y in local space, we rotate the proxy to aim)
-  if (lightData.type !== "point") {
-    const cone = new THREE.Mesh(
-      geos.cone,
-      new THREE.MeshBasicMaterial({ color: emissive, transparent: true, opacity: 0.55 })
-    );
-    cone.userData.editorLightId = lightData.id;
-    proxy.add(cone);
-  }
-
-  // Ray lines (point light gets them in all directions)
-  const rayMat = new THREE.LineBasicMaterial({ color: emissive, transparent: true, opacity: 0.4 });
-  const rays = new THREE.LineSegments(geos.rays, rayMat);
-  rays.userData.editorLightId = lightData.id;
-  proxy.add(rays);
-
-  // Type label using a tiny sprite
-  const labelCanvas = document.createElement("canvas");
-  labelCanvas.width = 128;
-  labelCanvas.height = 32;
-  const ctx = labelCanvas.getContext("2d");
-  ctx.fillStyle = "rgba(0,0,0,0)";
-  ctx.fillRect(0, 0, 128, 32);
-  ctx.fillStyle = "#ffffff";
-  ctx.font = "bold 18px sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  const typeLabel = lightData.type === "point" ? "POINT" : lightData.type === "spot" ? "SPOT" : "DIR";
-  ctx.fillText(typeLabel, 64, 16);
-  const tex = new THREE.CanvasTexture(labelCanvas);
-  const spriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0.7, depthTest: false });
-  const sprite = new THREE.Sprite(spriteMat);
-  sprite.scale.set(0.5, 0.14, 1);
-  sprite.position.set(0, 0.28, 0);
-  sprite.userData.editorLightId = lightData.id;
-  proxy.add(sprite);
-
-  return proxy;
-}
-
-function syncLightFromProxy(lightData) {
-  if (!lightData._lightObj || !lightData._proxyObj) return;
-  const proxy = lightData._proxyObj;
-  const light = lightData._lightObj;
-
-  // Sync position
-  light.position.copy(proxy.position);
-  lightData.position = { x: proxy.position.x, y: proxy.position.y, z: proxy.position.z };
-
-  // Sync rotation → compute target from proxy's -Y axis (local down)
-  const dir = new THREE.Vector3(0, -1, 0);
-  dir.applyQuaternion(proxy.quaternion).normalize();
-  const targetDist = 5; // how far "ahead" the target sits
-  const targetPos = proxy.position.clone().add(dir.multiplyScalar(targetDist));
-
-  lightData.rotation = { x: proxy.rotation.x, y: proxy.rotation.y, z: proxy.rotation.z };
-
-  if (light.target) {
-    light.target.position.copy(targetPos);
-    lightData.target = { x: targetPos.x, y: targetPos.y, z: targetPos.z };
-    light.target.updateMatrixWorld();
-  }
-}
 
 function instantiateEditorLight(lightData) {
   // Remove existing
@@ -7024,44 +5219,8 @@ function instantiateEditorLight(lightData) {
 
   lightsGroup.add(lightObj);
   lightData._lightObj = lightObj;
-
-  // Create visible proxy icon (bulb mesh group)
-  const proxy = createLightProxy(lightData);
-  proxy.position.copy(lightObj.position);
-
-  // Restore rotation if saved
-  if (lightData.rotation) {
-    proxy.rotation.set(lightData.rotation.x, lightData.rotation.y, lightData.rotation.z);
-  } else if (lightObj.target) {
-    // Compute initial rotation from position → target
-    const targetPos = lightObj.target.position.clone();
-    const lightPos = lightObj.position.clone();
-    const dir = targetPos.sub(lightPos).normalize();
-    // We want the proxy's -Y axis to point along dir
-    const up = new THREE.Vector3(0, -1, 0);
-    const q = new THREE.Quaternion().setFromUnitVectors(up, dir);
-    proxy.quaternion.copy(q);
-    lightData.rotation = { x: proxy.rotation.x, y: proxy.rotation.y, z: proxy.rotation.z };
-  }
-
-  proxy.visible = shouldShowEditorGuides();
-  lightsGroup.add(proxy);
-  lightData._proxyObj = proxy;
-
-  // Also keep a minimal helper line from light to target for directional/spot
-  if (lightData.type !== "point") {
-    const helperMat = new THREE.LineBasicMaterial({ color: color, transparent: true, opacity: 0.25 });
-    const points = [lightObj.position.clone(), lightObj.target?.position?.clone() || new THREE.Vector3()];
-    const helperLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), helperMat);
-    helperLine.name = `lightHelper:${lightData.id}`;
-    helperLine.userData.editorLightId = lightData.id;
-    helperLine.userData.isLightHelper = true;
-    helperLine.visible = shouldShowEditorGuides();
-    lightsGroup.add(helperLine);
-    lightData._helperObj = helperLine;
-  } else {
-    lightData._helperObj = null;
-  }
+  lightData._proxyObj = null;
+  lightData._helperObj = null;
 }
 
 function removeEditorLightObjects(id) {
@@ -7084,192 +5243,7 @@ function removeEditorLightObjects(id) {
   }
 }
 
-function addEditorLight(type) {
-  // Place light in front of camera
-  const dir = camera.getWorldDirection(new THREE.Vector3());
-  const p = camera.getWorldPosition(new THREE.Vector3());
-  const spawnPos = { x: p.x + dir.x * 3, y: p.y + 3, z: p.z + dir.z * 3 };
 
-  const lightData = {
-    id: randId(),
-    type: type || "directional",
-    name: (type || "directional").charAt(0).toUpperCase() + (type || "directional").slice(1) + " Light",
-    color: "#ffffff",
-    intensity: type === "directional" ? 1.5 : 1.0,
-    position: spawnPos,
-    target: { x: spawnPos.x, y: 0, z: spawnPos.z },
-    distance: type === "point" ? 20 : type === "spot" ? 20 : 0,
-    angle: Math.PI / 4,
-    penumbra: 0.1,
-    castShadow: false,
-  };
-
-  editorLights.push(lightData);
-  instantiateEditorLight(lightData);
-  saveTagsForWorld();
-  renderLightsList();
-  selectLight(lightData.id);
-  setStatus(`${lightData.name} placed. Use transform tools to position.`);
-}
-
-function selectLight(id) {
-  detachGroupTransform();
-  selectedGroupId = null;
-  const gd = document.getElementById("group-details");
-  if (gd) gd.remove();
-
-  selectedLightId = id;
-  if (id) {
-    selectedAssetId = null;
-    selectedPrimitiveId = null;
-    selectedSceneLightId = null;
-    renderAssetsList();
-    renderPrimitivesList();
-    renderPrimitiveProps();
-    renderSceneLightsList();
-    renderSceneLightProps();
-  }
-  renderLightsList();
-  renderLightProps();
-  updateDetailsPanel();
-
-  const lightData = editorLights.find((l) => l.id === id);
-  const proxy = lightData?._proxyObj;
-  if (appMode === "edit" && proxy) {
-    transformControls.attach(proxy);
-    transformControls.enabled = true;
-    transformControls.visible = true;
-  } else if (!selectedAssetId && !selectedPrimitiveId) {
-    transformControls.detach();
-    transformControls.enabled = false;
-    transformControls.visible = false;
-  }
-}
-
-function getSelectedLight() {
-  return editorLights.find((l) => l.id === selectedLightId) || null;
-}
-
-function persistSelectedLightTransform() {
-  const ld = getSelectedLight();
-  if (!ld) return;
-
-  // Sync from proxy → light
-  syncLightFromProxy(ld);
-
-  // Update the helper line if present
-  if (ld._helperObj && ld._helperObj.geometry && ld._lightObj) {
-    const pts = [ld._lightObj.position.clone(), ld._lightObj.target?.position?.clone() || new THREE.Vector3()];
-    ld._helperObj.geometry.dispose();
-    ld._helperObj.geometry = new THREE.BufferGeometry().setFromPoints(pts);
-  }
-
-  saveTagsForWorld();
-}
-
-function deleteEditorLight(id) {
-  const idx = editorLights.findIndex((l) => l.id === id);
-  if (idx === -1) return;
-  removeEditorLightObjects(id);
-  editorLights.splice(idx, 1);
-  if (selectedLightId === id) {
-    selectedLightId = null;
-    transformControls?.detach();
-    transformControls.visible = false;
-    transformControls.enabled = false;
-  }
-  saveTagsForWorld();
-  renderLightsList();
-  renderLightProps();
-  setStatus("Light deleted.");
-}
-
-function updateEditorLightFromProps(ld) {
-  if (!ld?._lightObj) return;
-  const obj = ld._lightObj;
-  obj.color.set(ld.color || "#ffffff");
-  obj.intensity = ld.intensity ?? 1.0;
-  if (obj.isPointLight || obj.isSpotLight) {
-    obj.distance = ld.distance ?? 0;
-  }
-  if (obj.isSpotLight) {
-    obj.angle = ld.angle ?? Math.PI / 4;
-    obj.penumbra = ld.penumbra ?? 0.1;
-  }
-  if (obj.target) {
-    const t = ld.target || { x: 0, y: 0, z: 0 };
-    obj.target.position.set(t.x, t.y, t.z);
-  }
-  obj.castShadow = ld.castShadow ?? false;
-
-  // Update proxy icon colors to match light color
-  if (ld._proxyObj) {
-    const c = new THREE.Color(ld.color || "#ffffff");
-    ld._proxyObj.traverse((child) => {
-      if (child.isMesh && child.material && child !== ld._proxyObj.children[0]) {
-        // Don't change the white bulb core; tint everything else
-        child.material.color.copy(c);
-      }
-      if (child.isLine && child.material) {
-        child.material.color.copy(c);
-      }
-    });
-  }
-
-  // Update helper line endpoints
-  if (ld._helperObj && ld._helperObj.geometry && obj.target) {
-    const pts = [obj.position.clone(), obj.target.position.clone()];
-    ld._helperObj.geometry.dispose();
-    ld._helperObj.geometry = new THREE.BufferGeometry().setFromPoints(pts);
-    if (ld._helperObj.material) ld._helperObj.material.color.set(ld.color || "#ffffff");
-  }
-
-  saveTagsForWorld();
-}
-
-function renderLightsList() {
-  if (!lightsListEl) return;
-  lightsListEl.innerHTML = "";
-  for (const l of editorLights) {
-    const el = document.createElement("div");
-    el.className = "tag-item" + (l.id === selectedLightId ? " active" : "");
-    el.innerHTML = `${escapeHtml(l.name || l.type)}<small>${escapeHtml(l.type)}</small>`;
-    el.addEventListener("click", () => selectLight(l.id));
-    lightsListEl.appendChild(el);
-  }
-  updateOutlinerCounts();
-}
-
-function renderLightProps() {
-  const ld = getSelectedLight();
-  if (lightPropsEl) lightPropsEl.classList.toggle("hidden", !ld);
-  if (!ld) return;
-
-  if (lightNameEl) lightNameEl.value = ld.name || "";
-  if (lightTypeEl) lightTypeEl.value = ld.type || "directional";
-  if (lightColorEl) lightColorEl.value = ld.color || "#ffffff";
-  if (lightIntensityEl) lightIntensityEl.value = String(ld.intensity ?? 1.0);
-  if (lightIntensityValEl) lightIntensityValEl.textContent = (ld.intensity ?? 1.0).toFixed(2);
-  if (lightDistanceEl) lightDistanceEl.value = String(ld.distance ?? 0);
-  if (lightDistanceValEl) lightDistanceValEl.textContent = String(Math.round(ld.distance ?? 0));
-  if (lightAngleEl) lightAngleEl.value = String(ld.angle ?? 0.78);
-  if (lightAngleValEl) lightAngleValEl.textContent = Math.round(((ld.angle ?? 0.78) * 180) / Math.PI) + "\u00B0";
-  if (lightPenumbraEl) lightPenumbraEl.value = String(ld.penumbra ?? 0.1);
-  if (lightPenumbraValEl) lightPenumbraValEl.textContent = (ld.penumbra ?? 0.1).toFixed(2);
-
-  const t = ld.target || { x: 0, y: 0, z: 0 };
-  if (lightTargetXEl) lightTargetXEl.value = t.x;
-  if (lightTargetYEl) lightTargetYEl.value = t.y;
-  if (lightTargetZEl) lightTargetZEl.value = t.z;
-
-  if (lightCastShadowEl) lightCastShadowEl.checked = ld.castShadow ?? false;
-
-  // Show/hide groups based on type
-  const isPoint = ld.type === "point";
-  const isSpot = ld.type === "spot";
-  if (lightDistanceGroupEl) lightDistanceGroupEl.classList.toggle("hidden", !isPoint && !isSpot);
-  if (lightSpotGroupEl) lightSpotGroupEl.classList.toggle("hidden", !isSpot);
-}
 
 function rebuildAllEditorLights() {
   // Remove all light objects
@@ -7293,278 +5267,11 @@ function rebuildAllEditorLights() {
 }
 
 // =============================================================================
-// SCENE LIGHTS – Built-in lights exposed in the editor
-// =============================================================================
-
-let selectedSceneLightId = null;
-
-function renderSceneLightsList() {
-  if (!sceneLightsListEl) return;
-  sceneLightsListEl.innerHTML = "";
-  for (const sl of sceneLights) {
-    const el = document.createElement("div");
-    el.className = "tag-item" + (sl.id === selectedSceneLightId ? " active" : "");
-    const isOn = sl.type === "sky" ? sceneSettings.sky.enabled : sl.obj.visible !== false;
-    const onOff = isOn ? "" : " (off)";
-    el.innerHTML = `${escapeHtml(sl.label)}${onOff}<small>${escapeHtml(sl.type)}</small>`;
-    el.addEventListener("click", () => selectSceneLight(sl.id));
-    sceneLightsListEl.appendChild(el);
-  }
-}
-
-function selectSceneLight(id) {
-  selectedSceneLightId = id;
-  // Deselect everything else
-  if (id) {
-    selectedAssetId = null;
-    selectedPrimitiveId = null;
-    selectedLightId = null;
-    draftTag = null;
-    selectedTagId = null;
-    renderAssetsList();
-    renderPrimitivesList();
-    renderPrimitiveProps();
-    renderLightsList();
-    renderLightProps();
-    renderTagsList();
-    renderTagPanel();
-  }
-  renderSceneLightsList();
-  renderSceneLightProps();
-  updateDetailsPanel();
-
-  // No transform controls for scene lights (ambient/hemi have no position)
-  transformControls?.detach();
-  transformControls.visible = false;
-  transformControls.enabled = false;
-}
-
-function getSelectedSceneLight() {
-  return sceneLights.find((sl) => sl.id === selectedSceneLightId) || null;
-}
-
-function renderSceneLightProps() {
-  const sl = getSelectedSceneLight();
-  if (sceneLightPropsEl) sceneLightPropsEl.classList.toggle("hidden", !sl);
-  if (!sl) return;
-
-  const obj = sl.obj;
-  const isShadowGround = sl.type === "shadow_ground";
-  const isSky = sl.type === "sky";
-  if (slTitleEl) slTitleEl.textContent = sl.label;
-  if (slEnabledEl) slEnabledEl.checked = isSky ? !!sceneSettings?.sky?.enabled : obj.visible !== false;
-
-  // Shadow ground: repurpose intensity slider as opacity
-  if (isShadowGround) {
-    if (slColorEl) slColorEl.parentElement.classList.add("hidden");
-    if (slSkyControlsEl) slSkyControlsEl.classList.add("hidden");
-    if (slIntensityEl) {
-      slIntensityEl.min = "0";
-      slIntensityEl.max = "1";
-      slIntensityEl.step = "0.05";
-      slIntensityEl.value = String(obj.material?.opacity ?? 0.35);
-    }
-    if (slIntensityValEl) slIntensityValEl.textContent = (obj.material?.opacity ?? 0.35).toFixed(2);
-    // Relabel
-    const label = slIntensityEl?.parentElement?.querySelector(".slider-label");
-    if (label) label.textContent = "OPACITY";
-    if (slGroundRowEl) slGroundRowEl.classList.add("hidden");
-    if (slDistanceRowEl) slDistanceRowEl.classList.add("hidden");
-    if (slShadowRowEl) slShadowRowEl.classList.add("hidden");
-    return;
-  }
-
-  if (isSky) {
-    if (slColorEl) slColorEl.parentElement.classList.add("hidden");
-    if (slGroundRowEl) slGroundRowEl.classList.add("hidden");
-    if (slDistanceRowEl) slDistanceRowEl.classList.add("hidden");
-    if (slShadowRowEl) slShadowRowEl.classList.add("hidden");
-    if (slIntensityEl) slIntensityEl.parentElement.classList.add("hidden");
-    if (slSkyControlsEl) slSkyControlsEl.classList.remove("hidden");
-
-    const s = normalizeSceneSettings(sceneSettings).sky;
-    if (slSkyTopColorEl) slSkyTopColorEl.value = s.topColor;
-    if (slSkyHorizonColorEl) slSkyHorizonColorEl.value = s.horizonColor;
-    if (slSkyBottomColorEl) slSkyBottomColorEl.value = s.bottomColor;
-    if (slSkyBrightnessEl) slSkyBrightnessEl.value = String(s.brightness);
-    if (slSkyBrightnessValEl) slSkyBrightnessValEl.textContent = Number(s.brightness).toFixed(2);
-    if (slSkySoftnessEl) slSkySoftnessEl.value = String(s.softness);
-    if (slSkySoftnessValEl) slSkySoftnessValEl.textContent = Number(s.softness).toFixed(2);
-    if (slSkySunStrengthEl) slSkySunStrengthEl.value = String(s.sunStrength);
-    if (slSkySunStrengthValEl) slSkySunStrengthValEl.textContent = Number(s.sunStrength).toFixed(2);
-    if (slSkySunHeightEl) slSkySunHeightEl.value = String(s.sunHeight);
-    if (slSkySunHeightValEl) slSkySunHeightValEl.textContent = Number(s.sunHeight).toFixed(2);
-    return;
-  }
-
-  // Normal light
-  if (slSkyControlsEl) slSkyControlsEl.classList.add("hidden");
-  if (slIntensityEl) slIntensityEl.parentElement.classList.remove("hidden");
-  if (slColorEl) {
-    slColorEl.parentElement.classList.remove("hidden");
-    slColorEl.value = "#" + obj.color.getHexString();
-  }
-  if (slIntensityEl) {
-    slIntensityEl.min = "0";
-    slIntensityEl.max = "10";
-    slIntensityEl.step = "0.05";
-    slIntensityEl.value = String(obj.intensity);
-  }
-  if (slIntensityValEl) slIntensityValEl.textContent = obj.intensity.toFixed(2);
-  const label = slIntensityEl?.parentElement?.querySelector(".slider-label");
-  if (label) label.textContent = "INTENSITY";
-
-  const isHemi = sl.type === "hemisphere";
-  const isPoint = sl.type === "point";
-  const isAmbient = sl.type === "ambient";
-  const canShadow = !isAmbient && !isHemi;
-  if (slGroundRowEl) slGroundRowEl.classList.toggle("hidden", !isHemi);
-  if (slDistanceRowEl) slDistanceRowEl.classList.toggle("hidden", !isPoint);
-  if (slShadowRowEl) slShadowRowEl.classList.toggle("hidden", !canShadow);
-  if (slShadowEl && canShadow) slShadowEl.checked = obj.castShadow ?? false;
-
-  if (isHemi && slGroundColorEl) {
-    slGroundColorEl.value = "#" + obj.groundColor.getHexString();
-  }
-  if (isPoint && slDistanceEl) {
-    slDistanceEl.value = String(obj.distance ?? 0);
-    if (slDistanceValEl) slDistanceValEl.textContent = String(Math.round(obj.distance ?? 0));
-  }
-}
-
-// Render the list on startup
-renderSceneLightsList();
-
-// =============================================================================
 // DETAILS PANEL & TRANSFORM XYZ – UE-style unified properties
 // =============================================================================
 
 const RAD2DEG = 180 / Math.PI;
 const DEG2RAD = Math.PI / 180;
-
-// Show the details panel and populate it for the currently selected object
-function updateDetailsPanel() {
-  const hasPrim = !!selectedPrimitiveId;
-  const hasLight = !!selectedLightId;
-  const hasAsset = !!selectedAssetId;
-  const hasTag = !!draftTag;
-  const hasSceneLight = !!selectedSceneLightId;
-  const hasGroup = !!selectedGroupId;
-  const hasAnything = hasPrim || hasLight || hasAsset || hasTag || hasSceneLight || hasGroup;
-
-  if (detailsPanelEl) detailsPanelEl.classList.toggle("hidden", !hasAnything);
-  if (assetDetailsEl) assetDetailsEl.classList.toggle("hidden", !hasAsset);
-  if (sceneLightPropsEl) sceneLightPropsEl.classList.toggle("hidden", !hasSceneLight);
-
-  refreshTransformToolbar();
-  renderBuilderStateEditorPanel();
-
-  if (!hasAnything) return;
-
-  // Set title
-  if (detailsTitleEl) {
-    if (hasSceneLight) {
-      const sl = getSelectedSceneLight();
-      detailsTitleEl.textContent = `Scene: ${sl?.label || "Light"}`;
-    } else if (hasPrim) {
-      const p = getSelectedPrimitive();
-      detailsTitleEl.textContent = `Shape: ${p?.name || p?.type || "Shape"}`;
-    } else if (hasLight) {
-      const l = getSelectedLight();
-      detailsTitleEl.textContent = `Light: ${l?.name || l?.type || "Light"}`;
-    } else if (hasAsset) {
-      const a = getSelectedAsset();
-      detailsTitleEl.textContent = `Asset: ${a?.title || "(asset)"}`;
-    } else if (hasTag) {
-      detailsTitleEl.textContent = `Tag: ${draftTag?.title || "(tag)"}`;
-    }
-  }
-
-  // Populate transform XYZ from the selected object
-  populateTransformInputs();
-}
-
-function populateTransformInputs() {
-  let obj3d = null;
-
-  if (selectedGroupId && groupPivot) {
-    obj3d = groupPivot;
-  } else if (selectedPrimitiveId) {
-    obj3d = primitivesGroup.getObjectByName(`prim:${selectedPrimitiveId}`);
-  } else if (selectedLightId) {
-    const ld = getSelectedLight();
-    obj3d = ld?._proxyObj || ld?._lightObj;
-  } else if (selectedAssetId) {
-    obj3d = assetsGroup.getObjectByName(`asset:${selectedAssetId}`);
-  } else if (draftTag) {
-    // Tags don't have full transform — just position
-    if (xformPxEl) xformPxEl.value = (draftTag.position?.x ?? 0).toFixed(2);
-    if (xformPyEl) xformPyEl.value = (draftTag.position?.y ?? 0).toFixed(2);
-    if (xformPzEl) xformPzEl.value = (draftTag.position?.z ?? 0).toFixed(2);
-    if (xformRxEl) xformRxEl.value = "0";
-    if (xformRyEl) xformRyEl.value = "0";
-    if (xformRzEl) xformRzEl.value = "0";
-    if (xformSxEl) xformSxEl.value = "1";
-    if (xformSyEl) xformSyEl.value = "1";
-    if (xformSzEl) xformSzEl.value = "1";
-    return;
-  }
-
-  if (!obj3d) return;
-
-  if (xformPxEl) xformPxEl.value = obj3d.position.x.toFixed(2);
-  if (xformPyEl) xformPyEl.value = obj3d.position.y.toFixed(2);
-  if (xformPzEl) xformPzEl.value = obj3d.position.z.toFixed(2);
-  if (xformRxEl) xformRxEl.value = (obj3d.rotation.x * RAD2DEG).toFixed(1);
-  if (xformRyEl) xformRyEl.value = (obj3d.rotation.y * RAD2DEG).toFixed(1);
-  if (xformRzEl) xformRzEl.value = (obj3d.rotation.z * RAD2DEG).toFixed(1);
-  if (xformSxEl) xformSxEl.value = obj3d.scale.x.toFixed(2);
-  if (xformSyEl) xformSyEl.value = obj3d.scale.y.toFixed(2);
-  if (xformSzEl) xformSzEl.value = obj3d.scale.z.toFixed(2);
-}
-
-function applyTransformFromInputs() {
-  const px = parseFloat(xformPxEl?.value) || 0;
-  const py = parseFloat(xformPyEl?.value) || 0;
-  const pz = parseFloat(xformPzEl?.value) || 0;
-  const rx = (parseFloat(xformRxEl?.value) || 0) * DEG2RAD;
-  const ry = (parseFloat(xformRyEl?.value) || 0) * DEG2RAD;
-  const rz = (parseFloat(xformRzEl?.value) || 0) * DEG2RAD;
-  const sx = Math.max(parseFloat(xformSxEl?.value) || 1, 0.01);
-  const sy = Math.max(parseFloat(xformSyEl?.value) || 1, 0.01);
-  const sz = Math.max(parseFloat(xformSzEl?.value) || 1, 0.01);
-
-  if (selectedGroupId && groupPivot) {
-    groupPivot.position.set(px, py, pz);
-    groupPivot.rotation.set(rx, ry, rz);
-    groupPivot.scale.set(sx, sy, sz);
-    persistGroupTransformsAndRebuild();
-  } else if (selectedPrimitiveId) {
-    const obj = primitivesGroup.getObjectByName(`prim:${selectedPrimitiveId}`);
-    if (obj) {
-      obj.position.set(px, py, pz);
-      obj.rotation.set(rx, ry, rz);
-      obj.scale.set(sx, sy, sz);
-      persistSelectedPrimitiveTransform();
-    }
-  } else if (selectedLightId) {
-    const ld = getSelectedLight();
-    const obj = ld?._proxyObj || ld?._lightObj;
-    if (obj) {
-      obj.position.set(px, py, pz);
-      obj.rotation.set(rx, ry, rz);
-      persistSelectedLightTransform();
-    }
-  } else if (selectedAssetId) {
-    const obj = assetsGroup.getObjectByName(`asset:${selectedAssetId}`);
-    if (obj) {
-      obj.position.set(px, py, pz);
-      obj.rotation.set(rx, ry, rz);
-      obj.scale.set(sx, sy, sz);
-      persistSelectedAssetTransform();
-    }
-  }
-}
 
 // Dynamically enable/disable the shadow map system.
 // When no light casts shadows, the renderer skips ALL shadow work (zero overhead).
@@ -7629,11 +5336,103 @@ function syncShadowMapEnabled() {
   if (anyCast) renderer.shadowMap.needsUpdate = true;
 }
 
-function updateOutlinerCounts() {
-  if (olTagsCountEl) olTagsCountEl.textContent = String(tags.length);
-  if (olAssetsCountEl) olAssetsCountEl.textContent = String(assets.length);
-  if (olPrimsCountEl) olPrimsCountEl.textContent = String(primitives.length) + (groups.length ? ` (${groups.length}g)` : "");
-  if (olLightsCountEl) olLightsCountEl.textContent = String(editorLights.length);
+function renderSceneInMode(mode) {
+  const savedOverride = scene.overrideMaterial;
+  const savedBg = scene.background;
+  const savedAssets = assetsGroup.visible;
+  const savedPrims = primitivesGroup.visible;
+  const savedLights = lightsGroup.visible;
+  const savedTags = tagsGroup.visible;
+  const savedLidar = lidarVizGroup.visible;
+  const savedOverlay = rgbdPcOverlayGroup.visible;
+
+  if (mode === "rgb") {
+    scene.overrideMaterial = null;
+    assetsGroup.visible = true;
+    primitivesGroup.visible = true;
+    lightsGroup.visible = true;
+    tagsGroup.visible = false;
+    lidarVizGroup.visible = false;
+    rgbdPcOverlayGroup.visible = false;
+    scene.background = DEFAULT_SCENE_BG;
+    renderer.render(scene, camera);
+  } else if (mode === "lidar") {
+    scene.overrideMaterial = null;
+    assetsGroup.visible = false;
+    primitivesGroup.visible = false;
+    lightsGroup.visible = false;
+    tagsGroup.visible = false;
+    lidarVizGroup.visible = true;
+    rgbdPcOverlayGroup.visible = rgbdPcOverlayOnLidar && _rgbdPcOverlayLastCount > 0;
+    scene.background = RGBD_BG;
+    renderer.render(scene, camera);
+  }
+
+  scene.overrideMaterial = savedOverride;
+  scene.background = savedBg;
+  assetsGroup.visible = savedAssets;
+  primitivesGroup.visible = savedPrims;
+  lightsGroup.visible = savedLights;
+  tagsGroup.visible = savedTags;
+  lidarVizGroup.visible = savedLidar;
+  rgbdPcOverlayGroup.visible = savedOverlay;
+}
+
+function renderCompareViews() {
+  const sz = renderer.getSize(new THREE.Vector2());
+  const W = sz.x;
+  const H = sz.y;
+  const halfW = Math.floor(W / 2);
+  const halfH = Math.floor(H / 2);
+
+  renderer.setScissorTest(true);
+  renderer.autoClear = false;
+
+  renderer.setViewport(0, 0, W, H);
+  renderer.setScissor(0, 0, W, H);
+  renderer.setClearColor(0x000000, 1);
+  renderer.clear(true, true, true);
+
+  // Top-left: RGB
+  renderer.setViewport(0, halfH, halfW, halfH);
+  renderer.setScissor(0, halfH, halfW, halfH);
+  renderer.setClearColor(DEFAULT_SCENE_BG, 1);
+  renderer.clear(true, true, true);
+  renderSceneInMode("rgb");
+
+  // Top-right: RGB-D
+  renderRgbdMetricPassOffscreen();
+  rgbdVizMaterial.uniforms.uGrayMode.value = rgbdVizMode === "gray" ? 1.0 : 0.0;
+  renderer.setRenderTarget(null);
+  renderer.setViewport(halfW, halfH, W - halfW, halfH);
+  renderer.setScissor(halfW, halfH, W - halfW, halfH);
+  renderer.setClearColor(RGBD_BG, 1);
+  renderer.clear(true, true, true);
+  renderer.render(rgbdVizScene, rgbdPostCamera);
+
+  // Bottom-center: LiDAR
+  const lidarX = Math.floor((W - halfW) / 2);
+  renderer.setViewport(lidarX, 0, halfW, halfH);
+  renderer.setScissor(lidarX, 0, halfW, halfH);
+  renderer.setClearColor(RGBD_BG, 1);
+  renderer.clear(true, true, true);
+  renderSceneInMode("lidar");
+
+  renderer.setScissorTest(false);
+  renderer.autoClear = true;
+  renderer.setViewport(0, 0, W, H);
+  renderer.setScissor(0, 0, W, H);
+}
+
+function renderActiveView() {
+  syncShadowMapEnabled();
+  if (simCompareView) {
+    renderCompareViews();
+  } else if (simSensorViewMode === "rgbd") {
+    renderRgbdView();
+  } else {
+    renderer.render(scene, camera);
+  }
 }
 
 const _tmpCamPos = new THREE.Vector3();
@@ -7759,7 +5558,7 @@ function despawnEphemeralAgents(reason = "task-end") {
 function createAiAgent({ ephemeral = false } = {}) {
   const endpoint = localStorage.getItem("sparkWorldVlmEndpoint") || "/vlm/decision";
   const model = resolveActiveVlmModel();
-  const nearbyRange = IS_SIM_ONLY_PROFILE ? 2.5 : appMode === "edit" ? 12 : 2.5;
+  const nearbyRange = 2.5;
   const id = `agent-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   let agentRef = null;
   const agent = new AiAvatar({
@@ -7770,8 +5569,7 @@ function createAiAgent({ ephemeral = false } = {}) {
     getWorldKey: () => worldKey,
     getTags: () => tags,
     getPlayerPosition: () => (Array.isArray(window.__playerPosition) ? window.__playerPosition : [0, 0, 0]),
-    // Editor workers use lightweight capsule form only (skip GLB load).
-    avatarUrl: appMode === "edit" ? "" : ["/agent-model/unitree_go2.glb", "/agent-model/robot.glb"],
+    avatarUrl: ["/agent-model/unitree_go2.glb", "/agent-model/robot.glb"],
     senseRadius: 3.0,
     walkSpeed: 2.0,
     // Headless mode in dimos: skip visual rendering, keep colliders for physics
@@ -7780,7 +5578,7 @@ function createAiAgent({ ephemeral = false } = {}) {
       // In dimos mode, VLM is disabled — agent pose is driven externally via /odom.
       // Ephemeral workers auto-enable; manually spawned agents start idle.
       enabled: dimosMode ? false : true,
-      showSpeechBubbleInScene: appMode !== "sim",
+      showSpeechBubbleInScene: false,
       holdPositionWhenIdle: true,
       endpoint,
       model,
@@ -7830,25 +5628,9 @@ function createAiAgent({ ephemeral = false } = {}) {
       decideEverySteps: ACTIVE_VLM_DEFAULTS.decideEverySteps,
       stepMeters: ACTIVE_VLM_DEFAULTS.stepMeters,
       getTask: () => ({ ..._getAgentTask(id) }),
-      // Editor agents need a broader object window so transform IDs stay visible.
       getNearbyAssets: (a) => getNearbyAssetsForAgent(a, nearbyRange),
       getNearbyPrimitives: (a) => getNearbyPrimitivesForAgent(a, nearbyRange),
-      isEditorMode: () => (!IS_SIM_ONLY_PROFILE && appMode === "edit"),
-      ...(!IS_SIM_ONLY_PROFILE
-        ? {
-            getRecentGeneratedAssets: (a) => getAgentRecentGeneratedAssets(a, 8),
-            getAssetLibraryNames: () =>
-              readAssetLibraryRecords()
-                .map((r) => String(r?.name || "").trim())
-                .filter(Boolean)
-                .slice(0, 40),
-            createPrimitiveInEditor: ({ agent: a, shape }) => agentCreatePrimitiveInEditor({ shape, agent: a }),
-            spawnLibraryAssetInEditor: ({ agent: a, assetName }) => agentSpawnLibraryAssetInEditor({ assetName, agent: a }),
-            transformObjectInEditor: (params) => agentTransformObjectInEditor(params),
-            generateAssetInEditor: ({ agent: a, prompt, placeNow, allowMultiple, count }) =>
-              agentGenerateAssetInEditor({ agent: a, prompt, placeNow, allowMultiple, count }),
-          }
-        : {}),
+      isEditorMode: () => false,
       interactAsset: ({ agent: a, assetId, actionId }) => agentInteractAsset({ agent: a, assetId, actionId }),
       pickUpAsset: ({ agent: a, assetId }) => agentPickUpAsset(a, assetId),
       dropAsset: ({ agent: a }) => agentDropAsset(a),
@@ -7953,16 +5735,37 @@ function createAiAgent({ ephemeral = false } = {}) {
   return agent;
 }
 
-async function ensureEditorWorkerPool(targetCount = EDITOR_TASK_WORKER_TARGET) {
-  if (appMode !== "edit") return;
-  const desired = Math.max(1, Math.min(EDITOR_MAX_AGENT_COUNT, Number(targetCount) || EDITOR_TASK_WORKER_TARGET));
-  let tries = 0;
-  while (aiAgents.length < desired && tries < desired + 2) {
-    const before = aiAgents.length;
-    await spawnOrMoveAiAtAim({ createNew: true, silent: true, ephemeral: true });
-    tries += 1;
-    if (aiAgents.length === before) break;
+
+async function ensureRapierLoaded() {
+  if (RAPIER) return;
+  if (!_rapierInitPromise) {
+    _rapierInitPromise = _doRapierInit();
   }
+  return _rapierInitPromise;
+}
+
+async function _doRapierInit() {
+  RAPIER = await import("@dimforge/rapier3d-compat");
+  await RAPIER.init();
+  rapierWorld = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
+  worldBody = rapierWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+
+  const radius = PLAYER_RADIUS;
+  const halfHeight = PLAYER_HALF_HEIGHT;
+  playerBody = rapierWorld.createRigidBody(
+    RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, 3, 0)
+  );
+  playerCollider = rapierWorld.createCollider(
+    RAPIER.ColliderDesc.capsule(halfHeight, radius).setFriction(0.0),
+    playerBody
+  );
+
+  characterController = rapierWorld.createCharacterController(0.02);
+  characterController.setSlideEnabled(true);
+  characterController.enableAutostep(0.55, 0.25, true);
+  characterController.enableSnapToGround(0.25);
+  characterController.setMaxSlopeClimbAngle(Math.PI / 3);
+  characterController.setMinSlopeSlideAngle(Math.PI / 2);
 }
 
 async function spawnOrMoveAiAtAim({ createNew = false, silent = false, ephemeral = false } = {}) {
@@ -7977,8 +5780,8 @@ async function spawnOrMoveAiAtAim({ createNew = false, silent = false, ephemeral
 
   let agent = createNew ? null : aiAgents[0] || null;
   if (!agent) {
-    if (aiAgents.length >= EDITOR_MAX_AGENT_COUNT) {
-      if (!silent) setStatus(`Agent cap reached (${EDITOR_MAX_AGENT_COUNT}).`);
+    if (aiAgents.length >= MAX_AGENT_COUNT) {
+      if (!silent) setStatus(`Agent cap reached (${MAX_AGENT_COUNT}).`);
       return;
     }
     agent = createAiAgent({ ephemeral });
@@ -7999,9 +5802,10 @@ async function spawnOrMoveAiAtAim({ createNew = false, silent = false, ephemeral
   chosen = findNearbyFreeSpotForCollider(agent.collider, candA, 2.0, 0.12);
   if (!chosen) chosen = findNearbyFreeSpotForCollider(agent.collider, candB, 2.0, 0.12);
   if (!chosen) chosen = findNearbyFreeSpotForCollider(agent.collider, { x: p0.x, y: p0.y + offset, z: p0.z }, 2.5, 0.12);
+  // Fallback: use placement point directly (slightly above surface) rather than failing silently.
   if (!chosen) {
-    if (!silent) setStatus("Couldn't find a free spot to place AI here.");
-    return;
+    chosen = { x: p0.x + n.x * 0.5, y: p0.y + n.y * 0.5 + 0.5, z: p0.z + n.z * 0.5 };
+    console.warn("[Spawn] No free collision spot found – using direct fallback placement at", chosen);
   }
 
   agent.setPosition(chosen.x, chosen.y, chosen.z);
@@ -8143,40 +5947,6 @@ function removeAgentBadge(agentId) {
   agentBadgeElsById.delete(id);
 }
 
-function updateAgentBadges() {
-  ensureAgentBadgeLayer();
-  const show = appMode === "edit" && aiAgents.length > 0;
-  if (!show) {
-    for (const [, badge] of agentBadgeElsById) badge.classList.add("hidden");
-    return;
-  }
-
-  const alive = new Set();
-  const rect = canvas.getBoundingClientRect();
-  const p = new THREE.Vector3();
-  for (const a of aiAgents) {
-    if (!a?.group) continue;
-    const id = a.id;
-    alive.add(id);
-    const badge = getOrCreateAgentBadge(id);
-    if (!badge) continue;
-    const [x, y, z] = a.getPosition?.() || [0, 0, 0];
-    p.set(x, y + (a.halfHeight || 0.25) + 0.55, z).project(camera);
-    const hidden = p.z < -1 || p.z > 1;
-      badge.classList.toggle("hidden", hidden);
-    if (!hidden) {
-      const sx = rect.left + (p.x * 0.5 + 0.5) * rect.width;
-      const sy = rect.top + (-p.y * 0.5 + 0.5) * rect.height;
-      badge.style.left = `${Math.round(sx)}px`;
-      badge.style.top = `${Math.round(sy)}px`;
-      badge.classList.toggle("active", selectedAgentInspectorId === id);
-    }
-  }
-
-  for (const [id] of agentBadgeElsById) {
-    if (!alive.has(id)) removeAgentBadge(id);
-  }
-}
 
 function pickTagMarkerFromCamera() {
   _raycaster.setFromCamera({ x: 0, y: 0 }, camera);
@@ -8190,89 +5960,10 @@ function pickTagMarkerFromCamera() {
   return null;
 }
 
-function beginTagAtAim() {
-  if (appMode !== "edit") setAppMode("edit");
-  const hit = rapierRaycastFromCamera();
-  if (!hit) {
-    setStatus("No collision surface under crosshair (need collision to tag).");
-    return;
-  }
-  const r = Number(tagRadiusEl?.value ?? 1.5);
-  draftTag = {
-    id: randId(),
-    title: "",
-    notes: "",
-    radius: Number.isFinite(r) ? r : 1.5,
-    position: hit.point,
-    normal: hit.normal,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-  };
-  selectedTagId = draftTag.id;
-  if (tagTitleEl) tagTitleEl.value = "";
-  if (tagNotesEl) tagNotesEl.value = "";
-  if (tagRadiusValueEl) tagRadiusValueEl.textContent = (draftTag.radius ?? 1.5).toFixed(2);
-  updateMarkerMaterials();
-  renderTagsList();
-  renderTagPanel();
-  setStatus("Tag placed. Fill details and click Save.");
-}
 
-function upsertDraftTag() {
-  if (!draftTag) return;
-  const title = String(tagTitleEl?.value ?? "").trim();
-  const notes = String(tagNotesEl?.value ?? "").trim();
-  const radius = Number(tagRadiusEl?.value ?? draftTag.radius ?? 1.5);
-  draftTag.title = title;
-  draftTag.notes = notes;
-  draftTag.radius = Number.isFinite(radius) ? radius : 1.5;
-  draftTag.updatedAt = Date.now();
 
-  const idx = tags.findIndex((t) => t.id === draftTag.id);
-  if (idx === -1) tags.unshift(draftTag);
-  else tags[idx] = draftTag;
-
-  saveTagsForWorld();
-  draftTag = null;
-  rebuildTagMarkers();
-  renderTagsList();
-  renderTagPanel();
-  setStatus("Tag saved.");
-}
-
-function cancelDraftTag() {
-  if (!draftTag) return;
-  const id = draftTag.id;
-  draftTag = null;
-  // If it wasn't saved, drop selection.
-  if (!tags.some((t) => t.id === id)) selectedTagId = null;
-  rebuildTagMarkers();
-  renderTagsList();
-  renderTagPanel();
-  setStatus("Tag edit cancelled.");
-}
-
-function deleteSelectedTag() {
-  const sel = getSelectedTag();
-  if (!sel) return;
-  tags = tags.filter((t) => t.id !== sel.id);
-  selectedTagId = null;
-  draftTag = null;
-  saveTagsForWorld();
-  rebuildTagMarkers();
-  renderTagsList();
-  renderTagPanel();
-  setStatus("Tag deleted.");
-}
-
-// Pointer lock: In edit mode, only lock on right-click so left-click is free for selection.
-// In sim mode, any click locks the pointer for FPS navigation.
+// Lock pointer and interact on click for FPS navigation.
 canvas.addEventListener("click", async (e) => {
-  if (appMode === "edit") {
-    // Edit mode: left-click is for selection (handled by mousedown below), don't lock
-    return;
-  }
-  // Sim mode: lock on click for FPS
   if (!controls.isLocked) {
     controls.enabled = true;
     try { controls.lock(); } catch {}
@@ -8281,10 +5972,10 @@ canvas.addEventListener("click", async (e) => {
   }
 });
 
-// Right-click to lock pointer in edit mode (for FPS navigation)
+// Right-click to lock pointer (for FPS navigation)
 canvas.addEventListener("contextmenu", (e) => {
   e.preventDefault();
-  if (appMode === "edit" && !controls.isLocked) {
+  if (!controls.isLocked) {
     controls.enabled = true;
     try { controls.lock(); } catch {}
   }
@@ -8294,41 +5985,13 @@ controls.addEventListener("lock", () => {
   controls.enabled = true;
 });
 controls.addEventListener("unlock", () => {
-  if (appMode === "sim") setStatus("Click to look around.");
+  setStatus("Click to look around.");
 });
 
 resetBtn?.addEventListener("click", () => {
-  // Reset to origin-ish; if splat loaded we’ll re-frame it.
   controls.object.position.set(0, 1.7, 4);
-  if (splatMesh) frameToSplat(splatMesh);
 });
 
-// Clear Level — remove all objects from the scene
-document.getElementById("clear-level-btn")?.addEventListener("click", () => {
-  if (!confirm("Clear ALL objects from the level? This cannot be undone.")) return;
-  detachGroupTransform();
-  for (const p of primitives) removePrimitiveCollider(p);
-  for (const a of assets) {
-    if (a._colliderHandle != null) {
-      try { if (typeof a._colliderHandle === "object") rapierWorld?.removeCollider(a._colliderHandle, true); } catch {}
-    }
-  }
-  while (assetsGroup.children.length) assetsGroup.remove(assetsGroup.children[0]);
-  while (primitivesGroup.children.length) { const c = primitivesGroup.children[0]; c.geometry?.dispose(); disposePrimitiveMaterial(c.material); primitivesGroup.remove(c); }
-  while (lightsGroup.children.length) { const c = lightsGroup.children[0]; c.traverse?.((m) => { m.geometry?.dispose(); m.material?.dispose(); }); lightsGroup.remove(c); }
-  while (tagsGroup.children.length) tagsGroup.remove(tagsGroup.children[0]);
-  _assetColliderHandles.clear();
-  _assetBumpVelocities.clear();
-  assets = []; primitives = []; editorLights = []; tags = []; groups = [];
-  selectedAssetId = null; selectedPrimitiveId = null; selectedLightId = null;
-  selectedSceneLightId = null; selectedTagId = null; draftTag = null; selectedGroupId = null;
-  transformControls?.detach(); transformControls.visible = false; transformControls.enabled = false;
-  saveTagsForWorld();
-  renderTagsList(); renderAssetsList(); renderPrimitivesList(); renderLightsList();
-  renderTagPanel(); renderPrimitiveProps(); renderLightProps(); renderSceneLightsList();
-  updateDetailsPanel(); updateOutlinerCounts();
-  setStatus("Level cleared.");
-});
 
 function setGhostMode(enabled) {
   ghostMode = !!enabled;
@@ -8349,19 +6012,7 @@ function setGhostMode(enabled) {
 // Ghost mode toggled via 'G' key only
 
 // Tagging UI
-setAppMode(appMode);
-updateEditorSimLightPreviewUi();
-// In sim mode, start with an empty scene so the user loads what they want.
-// In edit mode (or combined index.html), restore the previous session from localStorage.
-if (appMode !== "sim") {
-  loadTagsForWorld();
-}
-if (tagRadiusValueEl && tagRadiusEl) tagRadiusValueEl.textContent = Number(tagRadiusEl.value).toFixed(2);
-// Mode toggle buttons in each panel
-modeEditBtn?.addEventListener("click", () => setAppMode("sim"));
-modeSimBtn?.addEventListener("click", () => setAppMode("edit"));
-workspaceTabSceneBtn?.addEventListener("click", async () => { await switchWorkspace("scene"); });
-workspaceTabAssetBuilderBtn?.addEventListener("click", async () => { await switchWorkspace("assetBuilder"); });
+document.documentElement.dataset.mode = "sim";
 simPanelCollapseBtn?.addEventListener("click", () => {
   simPanelCollapsed = true;
   applySimPanelCollapsedState();
@@ -8376,25 +6027,9 @@ simCameraModeToggleBtn?.addEventListener("click", () => {
   updateSimCameraModeToggleUi();
   if (simUserCameraMode === "user") {
     if (agentCameraFollow) disableAgentCameraFollow();
-  } else if (appMode === "sim" && agentTask.active) {
+  } else if (agentTask.active) {
     enableAgentCameraFollow();
   }
-});
-editorSimLightPreviewBtn?.addEventListener("click", () => {
-  editorSimLightingPreview = !editorSimLightingPreview;
-  localStorage.setItem("sparkWorldEditorSimPreview", editorSimLightingPreview ? "1" : "0");
-  updateEditorSimLightPreviewUi();
-  applyEditorGuideVisibility();
-  setStatus(editorSimLightingPreview ? "Sim lighting preview ON" : "Sim lighting preview OFF");
-});
-// Left editor panel collapse/expand
-leftPanelCollapseBtn?.addEventListener("click", () => {
-  overlayEl.classList.add("left-collapsed");
-  leftPanelOpenBtn?.classList.remove("hidden");
-});
-leftPanelOpenBtn?.addEventListener("click", () => {
-  overlayEl.classList.remove("left-collapsed");
-  leftPanelOpenBtn?.classList.add("hidden");
 });
 simViewRgbdBtn?.addEventListener("click", () => {
   simCompareView = false;
@@ -8525,304 +6160,13 @@ simLidarMultiReturnBtn?.addEventListener("click", () => {
   if (simSensorViewMode === "lidar") updateLidarPointCloud();
   setStatus(`LiDAR return mode: ${lidarMultiReturnMode}`);
 });
-tagPlaceBtn?.addEventListener("click", () => beginTagAtAim());
 spawnAiBtn?.addEventListener("click", async () => {
-  await spawnOrMoveAiAtAim({ createNew: appMode === "edit", ephemeral: false });
-  if (appMode === "edit" && aiAgents.length > 0) {
-    selectAgentInspector(aiAgents[aiAgents.length - 1].id);
-    setStatus("Agent spawned. Use Selected Agent task box on the right.");
-  }
-});
-assetGlbInputEl?.addEventListener("change", async (e) => {
-  if (appMode !== "edit") return;
-  const file = e.target.files?.[0];
-  if (!file) return;
   try {
-    const buf = await file.arrayBuffer();
-    pendingAssetUpload = {
-      states: [
-        {
-          id: "s1",
-          name: file.name.replace(/\.glb$/i, "") || "state 1",
-          glbName: file.name,
-          dataBase64: base64FromArrayBuffer(buf),
-        },
-      ],
-      currentStateId: "s1",
-      actions: [],
-    };
-    if (assetTitleEl) assetTitleEl.value = file.name.replace(/\.glb$/i, "");
-    if (assetNotesEl) assetNotesEl.value = "";
-    if (assetPickableEl) assetPickableEl.checked = false;
-    renderAssetModal();
-    showModal(true);
+    await spawnOrMoveAiAtAim({ createNew: false, ephemeral: false });
   } catch (err) {
-    console.error(err);
-    setStatus(err?.message || "Failed to read GLB.");
-  } finally {
-    e.target.value = "";
+    console.error("[Spawn] Error spawning agent:", err);
+    setStatus("Spawn failed: " + (err?.message || String(err)));
   }
-});
-
-assetCancelBtn?.addEventListener("click", () => {
-  pendingAssetUpload = null;
-  showModal(false);
-});
-
-// =============================================================================
-// Portal system removed - no longer using /worlds/ directory
-// =============================================================================
-
-assetAddStateBtn?.addEventListener("click", () => {
-  if (!pendingAssetUpload) return;
-  const n = (pendingAssetUpload.states?.length || 0) + 1;
-  const id = `s${Date.now().toString(16)}${Math.random().toString(16).slice(2, 6)}`;
-  pendingAssetUpload.states.push({ id, name: `state ${n}`, glbName: "", dataBase64: "", interactions: [] });
-  renderAssetModal();
-});
-
-assetStatesContainerEl?.addEventListener("change", async (e) => {
-  if (!pendingAssetUpload) return;
-  const row = e.target?.closest?.(".asset-state-row");
-  const sid = row?.getAttribute?.("data-state-id");
-  if (!sid) return;
-  const st = pendingAssetUpload.states.find((x) => x.id === sid);
-  if (!st) return;
-
-  if (e.target?.name === "asset-initial-state") {
-    pendingAssetUpload.currentStateId = sid;
-    renderAssetModal();
-    return;
-  }
-
-  if (e.target?.getAttribute?.("data-field") === "file") {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const buf = await file.arrayBuffer();
-    st.glbName = file.name;
-    st.dataBase64 = base64FromArrayBuffer(buf);
-    renderAssetModal();
-    return;
-  }
-});
-
-assetStatesContainerEl?.addEventListener("input", (e) => {
-  if (!pendingAssetUpload) return;
-  const row = e.target?.closest?.(".asset-state-row");
-  const sid = row?.getAttribute?.("data-state-id");
-  if (!sid) return;
-  const st = pendingAssetUpload.states.find((x) => x.id === sid);
-  if (!st) return;
-  if (e.target?.getAttribute?.("data-field") === "name") {
-    st.name = e.target.value;
-    renderAssetModal();
-  }
-});
-
-assetStatesContainerEl?.addEventListener("click", (e) => {
-  if (!pendingAssetUpload) return;
-  const btn = e.target?.closest?.("button");
-  if (!btn) return;
-  const row = e.target?.closest?.(".asset-state-row");
-  const sid = row?.getAttribute?.("data-state-id");
-  if (!sid) return;
-  const action = btn.getAttribute("data-action");
-  if (action === "remove") {
-    pendingAssetUpload.states = pendingAssetUpload.states.filter((x) => x.id !== sid);
-    if (pendingAssetUpload.currentStateId === sid) pendingAssetUpload.currentStateId = pendingAssetUpload.states[0]?.id || null;
-    // Remove interactions referencing this state
-    for (const s of pendingAssetUpload.states) {
-      s.interactions = (s.interactions || []).filter((it) => it.to !== sid);
-    }
-    renderAssetModal();
-    return;
-  }
-
-  const st = pendingAssetUpload.states.find((x) => x.id === sid);
-  if (!st) return;
-
-  if (action === "add-interaction") {
-    const iid = `it_${Date.now().toString(16)}${Math.random().toString(16).slice(2, 6)}`;
-    st.interactions = st.interactions || [];
-    const fallbackTo = pendingAssetUpload.states.find((x) => x.id !== sid)?.id || sid;
-    st.interactions.push({ id: iid, label: "toggle", to: fallbackTo });
-    renderAssetModal();
-    return;
-  }
-
-  if (action === "remove-interaction") {
-    const irow = e.target?.closest?.(".asset-interaction-row");
-    const iid = irow?.getAttribute?.("data-interaction-id");
-    if (!iid) return;
-    st.interactions = (st.interactions || []).filter((it) => it.id !== iid);
-    renderAssetModal();
-    return;
-  }
-});
-
-assetStatesContainerEl?.addEventListener("input", (e) => {
-  if (!pendingAssetUpload) return;
-  const row = e.target?.closest?.(".asset-state-row");
-  const sid = row?.getAttribute?.("data-state-id");
-  if (!sid) return;
-  const st = pendingAssetUpload.states.find((x) => x.id === sid);
-  if (!st) return;
-
-  const irow = e.target?.closest?.(".asset-interaction-row");
-  const iid = irow?.getAttribute?.("data-interaction-id");
-  if (iid && e.target?.getAttribute?.("data-field") === "ilabel") {
-    const it = (st.interactions || []).find((x) => x.id === iid);
-    if (it) it.label = e.target.value;
-    return;
-  }
-});
-
-assetStatesContainerEl?.addEventListener("change", (e) => {
-  if (!pendingAssetUpload) return;
-  const row = e.target?.closest?.(".asset-state-row");
-  const sid = row?.getAttribute?.("data-state-id");
-  if (!sid) return;
-  const st = pendingAssetUpload.states.find((x) => x.id === sid);
-  if (!st) return;
-
-  const irow = e.target?.closest?.(".asset-interaction-row");
-  const iid = irow?.getAttribute?.("data-interaction-id");
-  if (iid && e.target?.getAttribute?.("data-field") === "ito") {
-    const it = (st.interactions || []).find((x) => x.id === iid);
-    if (it) it.to = e.target.value;
-    return;
-  }
-});
-
-assetCreateBtn?.addEventListener("click", async () => {
-  if (!pendingAssetUpload) return;
-  const id = randId();
-  const title = String(assetTitleEl?.value ?? "").trim();
-  const notes = String(assetNotesEl?.value ?? "").trim();
-  const placement = getPlacementAtCrosshair({ raycastDistance: 500, surfaceOffset: 0.02 });
-  const pos = placement.position;
-
-  // Validate states
-  const states = (pendingAssetUpload.states || []).filter(Boolean);
-  if (!states.length) {
-    setStatus("Asset needs at least one state.");
-    return;
-  }
-  for (const s of states) {
-    if (!s.dataBase64) {
-      setStatus("Please pick a .glb file for every state.");
-      return;
-    }
-    if (!s.name) s.name = s.glbName || s.id;
-  }
-  // Flatten interactions into actions.
-  let actions = [];
-  for (const s of states) {
-    const ints = Array.isArray(s.interactions) ? s.interactions : [];
-    for (const it of ints) {
-      if (!it.to || it.to === s.id) continue;
-      actions.push({ id: it.id || `act_${s.id}_${it.to}`, label: it.label || "toggle", from: s.id, to: it.to });
-    }
-  }
-  // If multiple states but no interactions, create a simple cycle.
-  if (states.length > 1 && actions.length === 0) {
-    for (let i = 0; i < states.length; i++) {
-      const from = states[i].id;
-      const to = states[(i + 1) % states.length].id;
-      actions.push({ id: `cycle_${from}_to_${to}`, label: "next state", from, to });
-      states[i].interactions = states[i].interactions || [];
-      states[i].interactions.push({ id: `cycle_${from}_to_${to}`, label: "next state", to });
-    }
-  }
-
-  const pickable = assetPickableEl?.checked ?? false;
-  const a = {
-    id,
-    title,
-    notes,
-    states,
-    currentStateId: pendingAssetUpload.currentStateId || states[0].id,
-    actions,
-    pickable,
-    transform: {
-      position: pos,
-      rotation: { x: 0, y: camera.rotation.y, z: 0 },
-      scale: { x: 1, y: 1, z: 1 },
-    },
-  };
-  assets.unshift(a);
-  pendingAssetUpload = null;
-  saveTagsForWorld();
-  showModal(false);
-  await instantiateAsset(a);
-  renderAssetsList();
-  selectAsset(a.id);
-  const s0 = Array.isArray(a.states) ? a.states.find((s) => s.id === a.currentStateId) || a.states[0] : null;
-  const nameShown = s0?.glbName || "";
-  setStatus(`Asset added: ${nameShown}`);
-});
-
-assetDeleteSelectedBtn?.addEventListener("click", () => {
-  if (appMode !== "edit") return;
-  deleteSelectedAsset();
-});
-assetEditStatesSelectedBtn?.addEventListener("click", async () => {
-  if (appMode !== "edit") return;
-  await editSelectedAssetStatesInBuilder();
-});
-
-function refreshTransformToolbar() {
-  const hasSel = !!getSelectedAsset() || !!getSelectedPrimitive() || !!getSelectedLight() || !!selectedGroupId;
-  const mode = transformControls?.getMode?.() || "translate";
-  assetToolMoveBtn?.classList.toggle("active", hasSel && mode === "translate");
-  assetToolRotateBtn?.classList.toggle("active", hasSel && mode === "rotate");
-  assetToolScaleBtn?.classList.toggle("active", hasSel && mode === "scale");
-  if (assetToolMoveBtn) assetToolMoveBtn.disabled = !hasSel;
-  if (assetToolRotateBtn) assetToolRotateBtn.disabled = !hasSel;
-  if (assetToolScaleBtn) assetToolScaleBtn.disabled = !hasSel;
-}
-
-function setTransformMode(mode) {
-  if (appMode !== "edit") return;
-  // Work with any selected object: asset, primitive, light, or group
-  const hasSel = !!getSelectedAsset() || !!getSelectedPrimitive() || !!getSelectedLight() || !!selectedGroupId;
-  if (!hasSel) return;
-  const m = mode === "rotate" || mode === "scale" ? mode : "translate";
-  transformControls?.setMode?.(m);
-  refreshTransformToolbar();
-}
-
-assetToolMoveBtn?.addEventListener("click", () => setTransformMode("translate"));
-assetToolRotateBtn?.addEventListener("click", () => setTransformMode("rotate"));
-assetToolScaleBtn?.addEventListener("click", () => setTransformMode("scale"));
-
-assetInteractSelectedBtn?.addEventListener("click", async () => {
-  if (appMode !== "edit") return;
-  await interactSelectedAssetDebug();
-});
-
-assetDuplicateSelectedBtn?.addEventListener("click", async () => {
-  if (appMode !== "edit") return;
-  await duplicateSelectedAsset();
-});
-
-// Asset shadow toggles — changing these rebuilds the asset visual
-assetCastShadowEl?.addEventListener("change", async () => {
-  const a = getSelectedAsset();
-  if (!a) return;
-  a.castShadow = assetCastShadowEl.checked;
-  if (!a.blobShadow) a.blobShadow = { opacity: 0.5, scale: 1.0, offsetX: 0, offsetY: 0, offsetZ: 0 };
-  saveTagsForWorld();
-  // Show/hide blob shadow sub-controls
-  if (blobShadowControlsEl) blobShadowControlsEl.classList.toggle("hidden", !a.castShadow);
-  // Detach transform gizmo BEFORE removing the old object from the scene
-  transformControls.detach();
-  // Rebuild the asset to add/remove blob shadow
-  const existing = assetsGroup.getObjectByName(`asset:${a.id}`);
-  if (existing?.parent) existing.parent.remove(existing);
-  await instantiateAsset(a);
-  // Reattach transform gizmo to the new object
-  selectAsset(a.id);
 });
 
 // --- Blob shadow live-adjustment helpers ---
@@ -8852,131 +6196,8 @@ function updateBlobShadowLive(assetId) {
   blob.position.z = bs.offsetZ ?? 0;
 }
 
-// Blob shadow slider / input listeners
-blobShadowOpacityEl?.addEventListener("input", () => {
-  const a = getSelectedAsset();
-  if (!a) return;
-  if (!a.blobShadow) a.blobShadow = {};
-  a.blobShadow.opacity = parseFloat(blobShadowOpacityEl.value);
-  if (blobShadowOpacityValEl) blobShadowOpacityValEl.textContent = a.blobShadow.opacity.toFixed(2);
-  updateBlobShadowLive(a.id);
-});
-blobShadowOpacityEl?.addEventListener("change", () => saveTagsForWorld());
-
-blobShadowScaleEl?.addEventListener("input", () => {
-  const a = getSelectedAsset();
-  if (!a) return;
-  if (!a.blobShadow) a.blobShadow = {};
-  a.blobShadow.scale = parseFloat(blobShadowScaleEl.value);
-  if (blobShadowScaleValEl) blobShadowScaleValEl.textContent = a.blobShadow.scale.toFixed(2);
-  updateBlobShadowLive(a.id);
-});
-blobShadowScaleEl?.addEventListener("change", () => saveTagsForWorld());
-
-blobShadowStretchEl?.addEventListener("input", () => {
-  const a = getSelectedAsset();
-  if (!a) return;
-  if (!a.blobShadow) a.blobShadow = {};
-  a.blobShadow.stretch = parseFloat(blobShadowStretchEl.value);
-  if (blobShadowStretchValEl) blobShadowStretchValEl.textContent = a.blobShadow.stretch.toFixed(2);
-  updateBlobShadowLive(a.id);
-});
-blobShadowStretchEl?.addEventListener("change", () => saveTagsForWorld());
-
-blobShadowRotEl?.addEventListener("input", () => {
-  const a = getSelectedAsset();
-  if (!a) return;
-  if (!a.blobShadow) a.blobShadow = {};
-  a.blobShadow.rotationDeg = parseFloat(blobShadowRotEl.value);
-  if (blobShadowRotValEl) blobShadowRotValEl.textContent = `${Math.round(a.blobShadow.rotationDeg)}°`;
-  updateBlobShadowLive(a.id);
-});
-blobShadowRotEl?.addEventListener("change", () => saveTagsForWorld());
-
-blobShadowOxEl?.addEventListener("input", () => {
-  const a = getSelectedAsset();
-  if (!a) return;
-  if (!a.blobShadow) a.blobShadow = {};
-  a.blobShadow.offsetX = parseFloat(blobShadowOxEl.value) || 0;
-  updateBlobShadowLive(a.id);
-});
-blobShadowOxEl?.addEventListener("change", () => saveTagsForWorld());
-
-blobShadowOyEl?.addEventListener("input", () => {
-  const a = getSelectedAsset();
-  if (!a) return;
-  if (!a.blobShadow) a.blobShadow = {};
-  a.blobShadow.offsetY = parseFloat(blobShadowOyEl.value) || 0;
-  updateBlobShadowLive(a.id);
-});
-blobShadowOyEl?.addEventListener("change", () => saveTagsForWorld());
-
-blobShadowOzEl?.addEventListener("input", () => {
-  const a = getSelectedAsset();
-  if (!a) return;
-  if (!a.blobShadow) a.blobShadow = {};
-  a.blobShadow.offsetZ = parseFloat(blobShadowOzEl.value) || 0;
-  updateBlobShadowLive(a.id);
-});
-blobShadowOzEl?.addEventListener("change", () => saveTagsForWorld());
-
-assetReceiveShadowEl?.addEventListener("change", () => {
-  const a = getSelectedAsset();
-  if (!a) return;
-  a.receiveShadow = assetReceiveShadowEl.checked;
-  saveTagsForWorld();
-  // Update in-place — just toggle receiveShadow on each mesh
-  const obj = assetsGroup.getObjectByName(`asset:${a.id}`);
-  if (obj) {
-    obj.traverse((m) => {
-      if (m.isMesh && !m.userData.isShadowProxy && !m.userData.isBlobShadow) {
-        m.receiveShadow = a.receiveShadow;
-      }
-    });
-  }
-});
-
-assetSelectedPickableEl?.addEventListener("change", () => {
-  const a = getSelectedAsset();
-  if (!a) return;
-  a.pickable = !!assetSelectedPickableEl.checked;
-  saveTagsForWorld();
-  renderAssetsList();
-});
-
-assetBumpableEl?.addEventListener("change", async () => {
-  const a = getSelectedAsset();
-  if (!a) return;
-  a.bumpable = !!assetBumpableEl.checked;
-  if (assetBumpControlsEl) assetBumpControlsEl.classList.toggle("hidden", !a.bumpable);
-  if (a.bumpable) {
-    _assetBumpVelocities.set(a.id, new THREE.Vector3());
-    await rebuildAssetCollider(a.id);
-  } else {
-    _assetBumpVelocities.delete(a.id);
-    await rebuildAssetCollider(a.id);
-  }
-  saveTagsForWorld();
-});
-
-assetBumpResponseEl?.addEventListener("input", () => {
-  const a = getSelectedAsset();
-  if (!a) return;
-  a.bumpResponse = parseFloat(assetBumpResponseEl.value) || 0.9;
-  if (assetBumpResponseValEl) assetBumpResponseValEl.textContent = a.bumpResponse.toFixed(2);
-});
-assetBumpResponseEl?.addEventListener("change", () => saveTagsForWorld());
-
-assetBumpDampingEl?.addEventListener("input", () => {
-  const a = getSelectedAsset();
-  if (!a) return;
-  a.bumpDamping = parseFloat(assetBumpDampingEl.value) || 0.9;
-  if (assetBumpDampingValEl) assetBumpDampingValEl.textContent = a.bumpDamping.toFixed(2);
-});
-assetBumpDampingEl?.addEventListener("change", () => saveTagsForWorld());
 
 // Initialize agent UI visibility/content.
-document.documentElement.dataset.mode = appMode;
 applySimPanelCollapsedState();
 renderAgentTaskUi();
 agentTaskStartBtn?.addEventListener("click", () => {
@@ -8987,52 +6208,9 @@ agentTaskEndBtn?.addEventListener("click", () => endAgentTask("manual"));
 // Enter key in command input starts task; stop propagation so WASD doesn't trigger
 agentTaskInputEl?.addEventListener("keydown", (e) => {
   e.stopPropagation();
-  if (e.key === "Enter" && !agentTask.active && (aiAgents.length > 0 || appMode === "edit")) {
+  if (e.key === "Enter" && !agentTask.active && aiAgents.length > 0) {
     void startAgentTask(agentTaskInputEl.value);
   }
-});
-tagRadiusEl?.addEventListener("input", () => {
-  if (tagRadiusValueEl) tagRadiusValueEl.textContent = Number(tagRadiusEl.value).toFixed(2);
-  if (draftTag) draftTag.radius = Number(tagRadiusEl.value);
-});
-tagSaveBtn?.addEventListener("click", () => upsertDraftTag());
-tagCancelBtn?.addEventListener("click", () => cancelDraftTag());
-tagDeleteBtn?.addEventListener("click", () => deleteSelectedTag());
-
-tagsExportBtn?.addEventListener("click", () => {
-  const exportAssets = assets.map((a) => {
-    const { _colliderHandle, ...rest } = a;
-    return rest;
-  });
-  // Export primitives (parametric – always tiny)
-  const exportPrimitives = primitives.map((p) => {
-    const { _colliderHandle, ...rest } = p;
-    return rest;
-  });
-  // Export lights (strip runtime objects)
-  const exportLights = editorLights.map((l) => {
-    const { _lightObj, _helperObj, _proxyObj, ...rest } = l;
-    return rest;
-  });
-  const payload = {
-    version: "2.0",
-    worldKey,
-    exportedAt: Date.now(),
-    tags,
-    assets: exportAssets,
-    primitives: exportPrimitives,
-    lights: exportLights,
-    groups,
-    sceneSettings: serializeSceneSettings(),
-  };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `spark-world-tags-${String(worldKey).replace(/[^a-z0-9_-]+/gi, "_")}.json`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 250);
 });
 
 // Shared import logic — used by both editor Import and sim Load Level
@@ -9044,22 +6222,17 @@ async function importLevelFromJSON(json, options = {}) {
     : (preserveAssetsWhenMissing ? assets : []);
   const importedPrimitives = Array.isArray(json?.primitives) ? json.primitives : [];
   const importedLights = Array.isArray(json?.lights) ? json.lights : [];
-  const importedGroups = Array.isArray(json?.groups) ? json.groups : [];
   const importedSceneSettings = json && typeof json === "object" && json.sceneSettings
     ? normalizeSceneSettings(json.sceneSettings)
     : null;
   if (!importedTags) throw new Error("Invalid level file.");
-  // Detach group pivot before clearing
-  detachGroupTransform();
   // Clean up old primitive colliders
   for (const p of primitives) removePrimitiveCollider(p);
   tags = importedTags;
   assets = importedAssets;
   primitives = importedPrimitives;
   editorLights = importedLights;
-  groups = importedGroups;
   if (importedSceneSettings) sceneSettings = importedSceneSettings;
-  selectedGroupId = null;
   if (!options.skipWorldSave) saveTagsForWorld();
   rebuildTagMarkers();
   await rebuildAssets();
@@ -9068,160 +6241,12 @@ async function importLevelFromJSON(json, options = {}) {
   renderTagsList();
   renderAssetsList();
   renderPrimitivesList();
-  renderLightsList();
   renderTagPanel();
-  renderPrimitiveProps();
-  renderLightProps();
   applySceneSkySettings();
   applySceneRgbBackground();
-  updateOutlinerCounts();
   syncShadowMapEnabled();
 }
 
-function captureCurrentLevelSnapshot() {
-  const exportAssets = assets.map((a) => {
-    const { _colliderHandle, ...rest } = a;
-    return rest;
-  });
-  const exportPrimitives = primitives.map((p) => {
-    const { _colliderHandle, ...rest } = p;
-    return rest;
-  });
-  const exportLights = editorLights.map((l) => {
-    const { _lightObj, _helperObj, _proxyObj, ...rest } = l;
-    return rest;
-  });
-  return {
-    version: "2.0",
-    tags: [...tags],
-    assets: exportAssets,
-    primitives: exportPrimitives,
-    lights: exportLights,
-    groups: [...groups],
-    sceneSettings: serializeSceneSettings(),
-  };
-}
-
-function emptyBuilderSnapshot() {
-  return {
-    version: "2.0",
-    tags: [],
-    assets: [],
-    primitives: [],
-    lights: [],
-    groups: [],
-    sceneSettings: serializeSceneSettings(),
-  };
-}
-
-function updateWorkspaceTabUi() {
-  const inBuilder = currentWorkspace === "assetBuilder";
-  workspaceTabSceneBtn?.classList.toggle("active", !inBuilder);
-  workspaceTabAssetBuilderBtn?.classList.toggle("active", inBuilder);
-  document.body.classList.toggle("staging-mode", inBuilder);
-  if (assetBuilderGrid) assetBuilderGrid.visible = inBuilder && appMode === "edit";
-  // Legacy toolbar save actions are hidden — panel is canonical save flow.
-  document.getElementById("staging-publish-sep")?.classList.add("hidden");
-  document.getElementById("staging-publish-asset-btn")?.classList.add("hidden");
-  document.getElementById("staging-save-state-btn")?.classList.add("hidden");
-
-  // Outliner sections
-  const assetsSection = document.getElementById("ol-assets-section");
-  const lightsSection = document.getElementById("ol-lights-section");
-  const sceneLightsSection = document.getElementById("ol-scene-lights-section");
-  const tagsSection = document.getElementById("ol-tags-section");
-  if (assetsSection) assetsSection.classList.toggle("hidden", inBuilder);
-  if (lightsSection) lightsSection.classList.toggle("hidden", inBuilder);
-  if (sceneLightsSection) sceneLightsSection.classList.toggle("hidden", inBuilder);
-  if (tagsSection) tagsSection.classList.toggle("hidden", inBuilder);
-
-  // Toolbar items: always show transform tools
-  const assetTransformTools = document.getElementById("asset-transform-tools");
-  if (assetTransformTools) assetTransformTools.classList.remove("hidden");
-
-  // Scene-only toolbar items: hide in builder
-  const sceneOnlyIds = [
-    "world-select", "world-load", "tag-place", "light-add-btn",
-    "portal-create-btn", "clear-level-btn", "tags-export", "advanced",
-  ];
-  for (const id of sceneOnlyIds) {
-    const el = document.getElementById(id);
-    if (el) {
-      const target = el.closest?.(".tb-group") || el.closest?.("label.tb-btn") || el;
-      target.classList.toggle("hidden", inBuilder);
-    }
-  }
-  // GLB import label
-  const assetImportInput = document.getElementById("asset-glb-input");
-  if (assetImportInput?.parentElement) assetImportInput.parentElement.classList.toggle("hidden", inBuilder);
-  // Import label (scene only)
-  const importInput = document.getElementById("tags-import");
-  if (importInput?.parentElement) importInput.parentElement.classList.toggle("hidden", inBuilder);
-
-  // Builder-mode inline shape bar
-  const builderShapeBar = document.getElementById("builder-shape-bar");
-  if (builderShapeBar) builderShapeBar.classList.toggle("hidden", !inBuilder);
-
-  // Toolbar separators: hide extras in builder (they look orphaned)
-  document.querySelectorAll("#overlay-top > .tb-sep").forEach((sep, i) => {
-    if (inBuilder && i !== 1) sep.classList.add("hidden");
-    else sep.classList.remove("hidden");
-  });
-
-  // Primitive props: hide scene-specific fields in builder
-  const primStateRow = document.getElementById("prim-state")?.closest?.(".dt-row");
-  const primPhysicsRow = document.getElementById("prim-physics")?.closest?.("label.prop-check");
-  const primMetaSection = document.getElementById("prim-meta-add")?.closest?.("details.dt-section");
-  const primNotesEl = document.getElementById("prim-notes");
-  const primTagsInputEl = document.getElementById("prim-tags-input");
-  if (primStateRow) primStateRow.classList.toggle("hidden", inBuilder);
-  if (primPhysicsRow) primPhysicsRow.classList.toggle("hidden", inBuilder);
-  if (primMetaSection) primMetaSection.classList.toggle("hidden", inBuilder);
-  if (primNotesEl) primNotesEl.classList.toggle("hidden", inBuilder);
-  if (primTagsInputEl) primTagsInputEl.classList.toggle("hidden", inBuilder);
-
-  renderBuilderStateEditorPanel();
-}
-
-async function switchWorkspace(nextWorkspace) {
-  if (nextWorkspace !== "scene" && nextWorkspace !== "assetBuilder") return;
-  if (appMode !== "edit") setAppMode("edit");
-  if (currentWorkspace === nextWorkspace) return;
-  workspaceSnapshots[currentWorkspace] = captureCurrentLevelSnapshot();
-  currentWorkspace = nextWorkspace;
-  // Reset builder state when leaving builder
-  if (nextWorkspace !== "assetBuilder") {
-    builderShowTypeChoice = false;
-  }
-  let nextSnapshot = workspaceSnapshots[nextWorkspace];
-  if (!nextSnapshot) {
-    nextSnapshot = nextWorkspace === "assetBuilder" ? emptyBuilderSnapshot() : emptyBuilderSnapshot();
-    workspaceSnapshots[nextWorkspace] = nextSnapshot;
-  }
-  await importLevelFromJSON(nextSnapshot, { skipWorldSave: true });
-  updateWorkspaceTabUi();
-  if (nextWorkspace === "assetBuilder") {
-    focusVibeStagingArea();
-    setStatus("Asset Builder — build with shapes, then save to library.");
-  } else {
-    setStatus("Scene workspace.");
-  }
-}
-
-tagsImportEl?.addEventListener("change", async (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  try {
-    const text = await file.text();
-    await importLevelFromJSON(JSON.parse(text));
-    setStatus("Level imported.");
-  } catch (err) {
-    console.error(err);
-    setStatus(err?.message || "Failed to import.");
-  } finally {
-    e.target.value = "";
-  }
-});
 
 // Sim-mode "Load Level JSON" input (only exists in sim.html)
 const simLevelImportEl = document.getElementById("sim-level-import");
@@ -9251,887 +6276,11 @@ canvas?.addEventListener("mousedown", () => {
   renderTagPanel();
 });
 
-// Object picking in edit mode — unified: find the CLOSEST hit across all types
-// (primitives, assets, lights) so an asset in front of a shape is picked correctly.
-canvas?.addEventListener("mousedown", (e) => {
-  if (appMode !== "edit") return;
-  if (e.button !== 0) return; // left-click only
-  if (transformControls?.dragging) return;
-
-  const rect = canvas.getBoundingClientRect();
-  // Screen-space fallback pick: very reliable for tiny/moving agent capsules.
-  // Only usable when pointer is unlocked and we have real cursor coordinates.
-  if (!controls.isLocked) {
-    const pickedByScreen = pickAgentFromScreenPoint(e.clientX, e.clientY, rect);
-    if (pickedByScreen) {
-      selectAgentInspector(pickedByScreen.id);
-      setStatus(`Inspecting ${pickedByScreen.id}. Use right panel controls.`);
-      return;
-    }
-  }
-
-  // Compute NDC mouse coords: crosshair (0,0) when locked, actual mouse pos when unlocked
-  let ndc;
-  if (controls.isLocked) {
-    ndc = { x: 0, y: 0 };
-  } else {
-    ndc = {
-      x: ((e.clientX - rect.left) / rect.width) * 2 - 1,
-      y: -((e.clientY - rect.top) / rect.height) * 2 + 1,
-    };
-  }
-  _assetRaycaster.setFromCamera(ndc, camera);
-
-  // --- AI agents (click to inspect; shift+click to manage stop/remove) ---
-  const pickedAgent = pickAgentFromRay(_assetRaycaster);
-  if (pickedAgent) {
-    selectAgentInspector(pickedAgent.id);
-    setStatus(`Inspecting ${pickedAgent.id}. Use right panel controls.`);
-    return;
-  }
-
-  // Collect the closest candidate from each category: { type, id, distance }
-  let best = null; // { type: "prim"|"asset"|"light", id: string, dist: number }
-
-  // --- Primitives (mesh raycast) ---
-  const primHits = _assetRaycaster.intersectObjects(primitivesGroup.children, true);
-  const primHit = primHits.find((h) => h.object?.userData?.primitiveId);
-  if (primHit) {
-    const d = primHit.distance;
-    if (!best || d < best.dist) best = { type: "prim", id: primHit.object.userData.primitiveId, dist: d };
-  }
-
-  // --- Lights (proxy icon raycast — only the small bulb proxies, not helpers/lines) ---
-  const lightTargets = lightsGroup.children.filter(
-    (c) => c.userData?.isLightProxy
-  );
-  const lightHits = _assetRaycaster.intersectObjects(lightTargets, true);
-  if (lightHits.length > 0) {
-    let obj = lightHits[0].object;
-    while (obj && !obj.userData?.editorLightId) obj = obj.parent;
-    if (obj?.userData?.editorLightId) {
-      const d = lightHits[0].distance;
-      // Only pick a light if it's very close to the click — prefer assets/prims
-      if (d < 8 && (!best || d < best.dist - 0.3)) best = { type: "light", id: obj.userData.editorLightId, dist: d };
-    }
-  }
-
-  // --- Assets (mesh raycast + bounding-box fallback) ---
-  // 1) Precise mesh raycast
-  const assetHits = _assetRaycaster.intersectObjects(assetsGroup.children, true);
-  for (const h of assetHits) {
-    if (h.object?.userData?.isBlobShadow || h.object?.userData?.isShadowProxy) continue;
-    const aid = h.object?.userData?.assetId;
-    if (aid) {
-      if (!best || h.distance < best.dist) best = { type: "asset", id: aid, dist: h.distance };
-      break; // first valid asset mesh hit is the closest
-    }
-  }
-  // 2) Bounding-box fallback for thin/sparse GLB meshes
-  if (!best || best.type !== "asset") {
-    const ray = _assetRaycaster.ray;
-    const _box = new THREE.Box3(), _hp = new THREE.Vector3();
-    for (const child of assetsGroup.children) {
-      const aid = child.name?.startsWith("asset:") ? child.name.slice(6) : null;
-      if (!aid) continue;
-      _box.setFromObject(child);
-      if (_box.isEmpty()) continue;
-      _box.expandByScalar(0.05);
-      const hit = ray.intersectBox(_box, _hp);
-      if (hit) {
-        const d = ray.origin.distanceTo(_hp);
-        if (!best || d < best.dist) best = { type: "asset", id: aid, dist: d };
-      }
-    }
-  }
-
-  // --- Apply the winning pick ---
-  if (best) {
-    switch (best.type) {
-      case "prim":  selectPrimitive(best.id); return;
-      case "asset": selectAsset(best.id); return;
-      case "light": selectLight(best.id); return;
-    }
-  }
-
-  // Nothing hit — deselect everything
-  if (selectedPrimitiveId) selectPrimitive(null);
-  if (selectedLightId) selectLight(null);
-  if (selectedAssetId) selectAsset(null);
-  if (selectedSceneLightId) selectSceneLight(null);
-  if (draftTag) {
-    draftTag = null;
-    selectedTagId = null;
-    renderTagPanel();
-    renderTagsList();
-    updateDetailsPanel();
-  }
-});
 
 // =============================================================================
 // PRIMITIVE & LIGHT EVENT HANDLERS
 // =============================================================================
 
-// Shape dropdown toggle
-shapeDropdownToggle?.addEventListener("click", (e) => {
-  e.stopPropagation();
-  shapeDropdownMenu?.classList.toggle("hidden");
-});
-
-// Close dropdown when clicking elsewhere
-document.addEventListener("click", () => {
-  shapeDropdownMenu?.classList.add("hidden");
-});
-
-// Shape buttons
-shapeDropdownMenu?.addEventListener("click", (e) => {
-  const btn = e.target.closest("button[data-shape]");
-  if (!btn) return;
-  const shape = btn.getAttribute("data-shape");
-  if (shape) {
-    addPrimitiveAtCrosshair(shape);
-    shapeDropdownMenu?.classList.add("hidden");
-  }
-});
-
-// Add light button
-lightAddBtn?.addEventListener("click", () => {
-  addEditorLight("directional");
-});
-
-// Primitive property inputs
-primNameEl?.addEventListener("input", () => {
-  const prim = getSelectedPrimitive();
-  if (prim) { prim.name = primNameEl.value; saveTagsForWorld(); renderPrimitivesList(); }
-});
-
-primNotesEl?.addEventListener("input", () => {
-  const prim = getSelectedPrimitive();
-  if (prim) { prim.notes = primNotesEl.value; saveTagsForWorld(); }
-});
-
-primTagsInputEl?.addEventListener("change", () => {
-  const prim = getSelectedPrimitive();
-  if (prim) {
-    prim.tags = (primTagsInputEl.value || "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    saveTagsForWorld();
-  }
-});
-
-primStateEl?.addEventListener("change", () => {
-  const prim = getSelectedPrimitive();
-  if (prim) { prim.state = primStateEl.value; saveTagsForWorld(); }
-});
-
-primMetaAddBtn?.addEventListener("click", () => {
-  const prim = getSelectedPrimitive();
-  if (!prim) return;
-  if (!prim.metadata) prim.metadata = {};
-  // Generate a unique default key name
-  let n = 1;
-  while (prim.metadata[`key${n}`] !== undefined) n++;
-  prim.metadata[`key${n}`] = "";
-  saveTagsForWorld();
-  renderPrimitiveMetadata(prim);
-});
-
-primMetaListEl?.addEventListener("input", (e) => {
-  const prim = getSelectedPrimitive();
-  if (!prim) return;
-  const row = e.target.closest(".meta-kv-row");
-  if (!row) return;
-  const oldKey = row.getAttribute("data-mk");
-  const field = e.target.getAttribute("data-field");
-
-  if (field === "val") {
-    // Value changed – update in place
-    if (oldKey != null && prim.metadata) {
-      prim.metadata[oldKey] = e.target.value;
-      saveTagsForWorld();
-    }
-  } else if (field === "key") {
-    // Key renamed
-    const newKey = e.target.value.trim();
-    if (!newKey || newKey === oldKey) return;
-    if (!prim.metadata) prim.metadata = {};
-    const val = prim.metadata[oldKey] ?? "";
-    delete prim.metadata[oldKey];
-    prim.metadata[newKey] = val;
-    row.setAttribute("data-mk", newKey);
-    saveTagsForWorld();
-  }
-});
-
-primMetaListEl?.addEventListener("click", (e) => {
-  const btn = e.target.closest("button[data-action='remove-meta']");
-  if (!btn) return;
-  const row = btn.closest(".meta-kv-row");
-  const key = row?.getAttribute("data-mk");
-  const prim = getSelectedPrimitive();
-  if (prim && key != null && prim.metadata) {
-    delete prim.metadata[key];
-    saveTagsForWorld();
-    renderPrimitiveMetadata(prim);
-  }
-});
-
-function editSelectedPrimitiveMaterial(editFn) {
-  const prim = getSelectedPrimitive();
-  if (!prim) return;
-    if (!prim.material) prim.material = {};
-  editFn(prim.material, prim);
-    updatePrimitiveMaterial(prim.id);
-    saveTagsForWorld();
-  }
-
-primColorEl?.addEventListener("input", () => {
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.color = primColorEl.value;
-  });
-});
-
-primRoughnessEl?.addEventListener("input", () => {
-  const roughness = parseFloat(primRoughnessEl.value);
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.softness = roughness;
-    mat.roughness = roughness;
-    if (primRoughnessValEl) primRoughnessValEl.textContent = roughness.toFixed(2);
-  });
-});
-
-primHardnessEl?.addEventListener("input", () => {
-  const hardness = parseFloat(primHardnessEl.value);
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.hardness = hardness;
-    mat.clearcoat = Math.max(mat.clearcoat ?? 0, hardness * 0.85);
-    mat.clearcoatRoughness = Math.min(mat.clearcoatRoughness ?? 1, 1 - hardness * 0.8);
-    if (primHardnessValEl) primHardnessValEl.textContent = hardness.toFixed(2);
-    if (primClearcoatEl) primClearcoatEl.value = String(mat.clearcoat);
-    if (primClearcoatValEl) primClearcoatValEl.textContent = Number(mat.clearcoat).toFixed(2);
-    if (primClearcoatRoughnessEl) primClearcoatRoughnessEl.value = String(mat.clearcoatRoughness);
-    if (primClearcoatRoughnessValEl) primClearcoatRoughnessValEl.textContent = Number(mat.clearcoatRoughness).toFixed(2);
-  });
-});
-
-primFluffinessEl?.addEventListener("input", () => {
-  const fluffiness = parseFloat(primFluffinessEl.value);
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.fluffiness = fluffiness;
-    if (primFluffinessValEl) primFluffinessValEl.textContent = fluffiness.toFixed(2);
-  });
-});
-
-primMetalnessEl?.addEventListener("input", () => {
-  const metalness = parseFloat(primMetalnessEl.value);
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.metalness = metalness;
-    if (primMetalnessValEl) primMetalnessValEl.textContent = metalness.toFixed(2);
-  });
-});
-
-primSpecularIntensityEl?.addEventListener("input", () => {
-  const value = parseFloat(primSpecularIntensityEl.value);
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.specularIntensity = value;
-    if (primSpecularIntensityValEl) primSpecularIntensityValEl.textContent = value.toFixed(2);
-  });
-});
-
-primSpecularColorEl?.addEventListener("input", () => {
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.specularColor = primSpecularColorEl.value;
-  });
-});
-
-primEnvIntensityEl?.addEventListener("input", () => {
-  const value = parseFloat(primEnvIntensityEl.value);
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.envMapIntensity = value;
-    if (primEnvIntensityValEl) primEnvIntensityValEl.textContent = value.toFixed(2);
-  });
-});
-
-primOpacityEl?.addEventListener("input", () => {
-  const opacity = parseFloat(primOpacityEl.value);
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.opacity = opacity;
-    if (primOpacityValEl) primOpacityValEl.textContent = opacity.toFixed(2);
-  });
-});
-
-primTransmissionEl?.addEventListener("input", () => {
-  const transmission = parseFloat(primTransmissionEl.value);
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.transmission = transmission;
-    if (primTransmissionValEl) primTransmissionValEl.textContent = transmission.toFixed(2);
-  });
-});
-
-primIorEl?.addEventListener("input", () => {
-  const ior = parseFloat(primIorEl.value);
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.ior = ior;
-    if (primIorValEl) primIorValEl.textContent = ior.toFixed(2);
-  });
-});
-
-primThicknessEl?.addEventListener("input", () => {
-  const thickness = parseFloat(primThicknessEl.value);
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.thickness = thickness;
-    if (primThicknessValEl) primThicknessValEl.textContent = thickness.toFixed(2);
-  });
-});
-
-primAttenuationColorEl?.addEventListener("input", () => {
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.attenuationColor = primAttenuationColorEl.value;
-  });
-});
-
-primAttenuationDistanceEl?.addEventListener("input", () => {
-  const value = parseFloat(primAttenuationDistanceEl.value);
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.attenuationDistance = value;
-    if (primAttenuationDistanceValEl) primAttenuationDistanceValEl.textContent = value.toFixed(2);
-  });
-});
-
-primIridescenceEl?.addEventListener("input", () => {
-  const value = parseFloat(primIridescenceEl.value);
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.iridescence = value;
-    if (primIridescenceValEl) primIridescenceValEl.textContent = value.toFixed(2);
-  });
-});
-
-primEmissiveColorEl?.addEventListener("input", () => {
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.emissive = primEmissiveColorEl.value;
-  });
-});
-
-primEmissiveIntensityEl?.addEventListener("input", () => {
-  const intensity = parseFloat(primEmissiveIntensityEl.value);
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.emissiveIntensity = intensity;
-    if (primEmissiveIntensityValEl) primEmissiveIntensityValEl.textContent = intensity.toFixed(2);
-  });
-});
-
-primClearcoatEl?.addEventListener("input", () => {
-  const clearcoat = parseFloat(primClearcoatEl.value);
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.clearcoat = clearcoat;
-    if (primClearcoatValEl) primClearcoatValEl.textContent = clearcoat.toFixed(2);
-  });
-});
-
-primClearcoatRoughnessEl?.addEventListener("input", () => {
-  const clearcoatRoughness = parseFloat(primClearcoatRoughnessEl.value);
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.clearcoatRoughness = clearcoatRoughness;
-    if (primClearcoatRoughnessValEl) primClearcoatRoughnessValEl.textContent = clearcoatRoughness.toFixed(2);
-  });
-});
-
-primAlphaCutoffEl?.addEventListener("input", () => {
-  const value = parseFloat(primAlphaCutoffEl.value);
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.alphaCutoff = value;
-    if (primAlphaCutoffValEl) primAlphaCutoffValEl.textContent = value.toFixed(2);
-  });
-});
-
-primTextureSoftnessEl?.addEventListener("input", () => {
-  const textureSoftness = parseFloat(primTextureSoftnessEl.value);
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.textureSoftness = textureSoftness;
-    if (primTextureSoftnessValEl) primTextureSoftnessValEl.textContent = textureSoftness.toFixed(2);
-  });
-});
-
-primTextureHardnessEl?.addEventListener("input", () => {
-  const textureHardness = parseFloat(primTextureHardnessEl.value);
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.textureHardness = textureHardness;
-    if (primTextureHardnessValEl) primTextureHardnessValEl.textContent = textureHardness.toFixed(2);
-  });
-});
-
-function updateSelectedPrimitiveUvTransform(mutator) {
-  editSelectedPrimitiveMaterial((mat) => {
-    if (!mat.uvTransform) mat.uvTransform = { repeatX: 1, repeatY: 1, offsetX: 0, offsetY: 0, rotationDeg: 0 };
-    mutator(mat.uvTransform);
-  });
-}
-
-const PRIMITIVE_MATERIAL_PRESETS = {
-  plastic: { softness: 0.35, hardness: 0.35, fluffiness: 0.0, metalness: 0.0, specularIntensity: 1.0, envMapIntensity: 0.9, transparency: 1, transmission: 0, ior: 1.47, thickness: 0, clearcoat: 0.55, clearcoatRoughness: 0.2, textureSoftness: 0.2, textureHardness: 0.65, alphaCutoff: 0, iridescence: 0 },
-  ceramic: { softness: 0.25, hardness: 0.55, fluffiness: 0.0, metalness: 0.0, specularIntensity: 1.2, envMapIntensity: 1.1, transparency: 1, transmission: 0, ior: 1.5, thickness: 0, clearcoat: 0.65, clearcoatRoughness: 0.08, textureSoftness: 0.15, textureHardness: 0.75, alphaCutoff: 0, iridescence: 0 },
-  rubber: { softness: 0.9, hardness: 0.15, fluffiness: 0.0, metalness: 0.0, specularIntensity: 0.4, envMapIntensity: 0.25, transparency: 1, transmission: 0, ior: 1.52, thickness: 0, clearcoat: 0.08, clearcoatRoughness: 0.7, textureSoftness: 0.55, textureHardness: 0.25, alphaCutoff: 0, iridescence: 0 },
-  fabric: { softness: 0.88, hardness: 0.1, fluffiness: 0.45, metalness: 0.0, specularIntensity: 0.35, envMapIntensity: 0.2, transparency: 1, transmission: 0, ior: 1.45, thickness: 0.02, clearcoat: 0.0, clearcoatRoughness: 0.9, textureSoftness: 0.5, textureHardness: 0.2, alphaCutoff: 0, iridescence: 0 },
-  velvet: { softness: 0.95, hardness: 0.05, fluffiness: 0.95, metalness: 0.0, specularIntensity: 0.3, envMapIntensity: 0.15, transparency: 1, transmission: 0, ior: 1.4, thickness: 0.05, clearcoat: 0.0, clearcoatRoughness: 1.0, textureSoftness: 0.65, textureHardness: 0.15, alphaCutoff: 0, iridescence: 0.05 },
-  cushion: { softness: 0.92, hardness: 0.12, fluffiness: 0.72, metalness: 0.0, specularIntensity: 0.25, envMapIntensity: 0.18, transparency: 1, transmission: 0, ior: 1.4, thickness: 0.04, clearcoat: 0.0, clearcoatRoughness: 0.95, textureSoftness: 0.7, textureHardness: 0.18, alphaCutoff: 0, iridescence: 0 },
-  leaf: { softness: 0.68, hardness: 0.25, fluffiness: 0.2, metalness: 0.0, specularIntensity: 0.8, envMapIntensity: 0.75, transparency: 1, transmission: 0.25, ior: 1.42, thickness: 0.03, clearcoat: 0.12, clearcoatRoughness: 0.5, textureSoftness: 0.2, textureHardness: 0.78, alphaCutoff: 0.45, iridescence: 0.05, attenuationColor: "#9ad07a", attenuationDistance: 0.45, doubleSided: true },
-  water: { softness: 0.02, hardness: 0.95, fluffiness: 0.0, metalness: 0.0, specularIntensity: 1.35, envMapIntensity: 1.6, transparency: 0.96, transmission: 1.0, ior: 1.333, thickness: 0.4, clearcoat: 1.0, clearcoatRoughness: 0.03, textureSoftness: 0.08, textureHardness: 0.9, alphaCutoff: 0, iridescence: 0.12, attenuationColor: "#74c6ff", attenuationDistance: 0.55 },
-  glass: { softness: 0.02, hardness: 0.92, fluffiness: 0.0, metalness: 0.0, specularIntensity: 1.25, envMapIntensity: 1.5, transparency: 0.98, transmission: 1.0, ior: 1.52, thickness: 0.35, clearcoat: 0.9, clearcoatRoughness: 0.02, textureSoftness: 0.1, textureHardness: 0.85, alphaCutoff: 0, iridescence: 0.0, attenuationColor: "#ffffff", attenuationDistance: 1.2 },
-  mirror: { softness: 0.0, hardness: 1.0, fluffiness: 0.0, metalness: 1.0, specularIntensity: 1.7, envMapIntensity: 2.4, transparency: 1, transmission: 0, ior: 2.2, thickness: 0.0, clearcoat: 1.0, clearcoatRoughness: 0.0, textureSoftness: 0.0, textureHardness: 1.0, alphaCutoff: 0, iridescence: 0.0 },
-  metal: { softness: 0.12, hardness: 0.86, fluffiness: 0.0, metalness: 0.95, specularIntensity: 1.5, envMapIntensity: 1.9, transparency: 1, transmission: 0, ior: 2.0, thickness: 0, clearcoat: 0.45, clearcoatRoughness: 0.06, textureSoftness: 0.1, textureHardness: 0.9, alphaCutoff: 0, iridescence: 0.0 },
-  concrete: { softness: 0.96, hardness: 0.88, fluffiness: 0.0, metalness: 0.0, specularIntensity: 0.2, envMapIntensity: 0.15, transparency: 1, transmission: 0, ior: 1.5, thickness: 0, clearcoat: 0.0, clearcoatRoughness: 1.0, textureSoftness: 0.35, textureHardness: 0.7, alphaCutoff: 0, iridescence: 0 },
-  emissive: { softness: 0.35, hardness: 0.4, fluffiness: 0.0, metalness: 0.0, specularIntensity: 0.8, envMapIntensity: 0.6, transparency: 1, transmission: 0, ior: 1.45, thickness: 0, clearcoat: 0.2, clearcoatRoughness: 0.25, textureSoftness: 0.2, textureHardness: 0.6, alphaCutoff: 0, iridescence: 0.08, emissive: "#88aaff", emissiveIntensity: 1.6 },
-};
-
-function applyPrimitiveMaterialPreset(presetKey) {
-  const preset = PRIMITIVE_MATERIAL_PRESETS[presetKey];
-  if (!preset) return;
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.softness = preset.softness ?? mat.softness ?? mat.roughness ?? 0.7;
-    mat.roughness = mat.softness;
-    mat.hardness = preset.hardness ?? mat.hardness ?? 0;
-    mat.fluffiness = preset.fluffiness ?? mat.fluffiness ?? 0;
-    mat.metalness = preset.metalness ?? mat.metalness ?? 0;
-    mat.specularIntensity = preset.specularIntensity ?? mat.specularIntensity ?? 1;
-    mat.specularColor = preset.specularColor || mat.specularColor || "#ffffff";
-    mat.envMapIntensity = preset.envMapIntensity ?? mat.envMapIntensity ?? 1;
-    if (preset.transparency !== undefined) mat.opacity = preset.transparency;
-    mat.transmission = preset.transmission ?? mat.transmission ?? 0;
-    mat.ior = preset.ior ?? mat.ior ?? 1.45;
-    mat.thickness = preset.thickness ?? mat.thickness ?? 0;
-    mat.attenuationColor = preset.attenuationColor || mat.attenuationColor || "#ffffff";
-    mat.attenuationDistance = preset.attenuationDistance ?? mat.attenuationDistance ?? 1.0;
-    mat.iridescence = preset.iridescence ?? mat.iridescence ?? 0;
-    mat.clearcoat = preset.clearcoat ?? mat.clearcoat ?? 0;
-    mat.clearcoatRoughness = preset.clearcoatRoughness ?? mat.clearcoatRoughness ?? 0;
-    mat.alphaCutoff = preset.alphaCutoff ?? mat.alphaCutoff ?? 0;
-    mat.textureSoftness = preset.textureSoftness ?? mat.textureSoftness ?? 0.25;
-    mat.textureHardness = preset.textureHardness ?? mat.textureHardness ?? 0.5;
-    mat.doubleSided = preset.doubleSided ?? mat.doubleSided ?? true;
-    if (preset.emissive) mat.emissive = preset.emissive;
-    if (preset.emissiveIntensity !== undefined) mat.emissiveIntensity = preset.emissiveIntensity;
-  });
-  renderPrimitiveProps();
-}
-
-primUvRepeatXEl?.addEventListener("input", () => {
-  const value = parseFloat(primUvRepeatXEl.value);
-  updateSelectedPrimitiveUvTransform((uv) => {
-    uv.repeatX = value;
-    if (primUvRepeatXValEl) primUvRepeatXValEl.textContent = value.toFixed(2);
-  });
-});
-
-primUvRepeatYEl?.addEventListener("input", () => {
-  const value = parseFloat(primUvRepeatYEl.value);
-  updateSelectedPrimitiveUvTransform((uv) => {
-    uv.repeatY = value;
-    if (primUvRepeatYValEl) primUvRepeatYValEl.textContent = value.toFixed(2);
-  });
-});
-
-primUvOffsetXEl?.addEventListener("input", () => {
-  const value = parseFloat(primUvOffsetXEl.value);
-  updateSelectedPrimitiveUvTransform((uv) => {
-    uv.offsetX = value;
-    if (primUvOffsetXValEl) primUvOffsetXValEl.textContent = value.toFixed(2);
-  });
-});
-
-primUvOffsetYEl?.addEventListener("input", () => {
-  const value = parseFloat(primUvOffsetYEl.value);
-  updateSelectedPrimitiveUvTransform((uv) => {
-    uv.offsetY = value;
-    if (primUvOffsetYValEl) primUvOffsetYValEl.textContent = value.toFixed(2);
-  });
-});
-
-primUvRotationEl?.addEventListener("input", () => {
-  const value = parseFloat(primUvRotationEl.value);
-  updateSelectedPrimitiveUvTransform((uv) => {
-    uv.rotationDeg = value;
-    if (primUvRotationValEl) primUvRotationValEl.textContent = String(Math.round(value));
-  });
-});
-
-primDoubleSidedEl?.addEventListener("change", () => {
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.doubleSided = !!primDoubleSidedEl.checked;
-  });
-});
-
-primFlatShadingEl?.addEventListener("change", () => {
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.flatShading = !!primFlatShadingEl.checked;
-  });
-});
-
-primWireframeEl?.addEventListener("change", () => {
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.wireframe = !!primWireframeEl.checked;
-  });
-});
-
-primTextureEl?.addEventListener("change", (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  const prim = getSelectedPrimitive();
-  if (!prim) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    editSelectedPrimitiveMaterial((mat) => {
-      mat.textureDataUrl = reader.result;
-    });
-    if (primTextureLabelEl) primTextureLabelEl.textContent = "Change";
-  };
-  reader.readAsDataURL(file);
-});
-
-primTextureClearBtn?.addEventListener("click", () => {
-  editSelectedPrimitiveMaterial((mat) => {
-    mat.textureDataUrl = null;
-  });
-    if (primTextureLabelEl) primTextureLabelEl.textContent = "Upload";
-});
-
-primPresetPlasticBtn?.addEventListener("click", () => applyPrimitiveMaterialPreset("plastic"));
-primPresetCeramicBtn?.addEventListener("click", () => applyPrimitiveMaterialPreset("ceramic"));
-primPresetRubberBtn?.addEventListener("click", () => applyPrimitiveMaterialPreset("rubber"));
-primPresetFabricBtn?.addEventListener("click", () => applyPrimitiveMaterialPreset("fabric"));
-primPresetVelvetBtn?.addEventListener("click", () => applyPrimitiveMaterialPreset("velvet"));
-primPresetCushionBtn?.addEventListener("click", () => applyPrimitiveMaterialPreset("cushion"));
-primPresetLeafBtn?.addEventListener("click", () => applyPrimitiveMaterialPreset("leaf"));
-primPresetWaterBtn?.addEventListener("click", () => applyPrimitiveMaterialPreset("water"));
-primPresetGlassBtn?.addEventListener("click", () => applyPrimitiveMaterialPreset("glass"));
-primPresetMirrorBtn?.addEventListener("click", () => applyPrimitiveMaterialPreset("mirror"));
-primPresetMetalBtn?.addEventListener("click", () => applyPrimitiveMaterialPreset("metal"));
-primPresetConcreteBtn?.addEventListener("click", () => applyPrimitiveMaterialPreset("concrete"));
-primPresetEmissiveBtn?.addEventListener("click", () => applyPrimitiveMaterialPreset("emissive"));
-
-primPhysicsEl?.addEventListener("change", () => {
-  const prim = getSelectedPrimitive();
-  if (prim) {
-    prim.physics = primPhysicsEl.checked;
-    if (!prim.physics) {
-      removePrimitiveCollider(prim);
-    } else if (rapierWorld && worldBody) {
-      rebuildPrimitiveColliderSync(prim);
-    } else {
-      _pendingColliderBuilds.push(prim);
-      ensureRapierLoaded();
-    }
-    saveTagsForWorld();
-  }
-});
-
-primCastShadowEl?.addEventListener("change", () => {
-  const prim = getSelectedPrimitive();
-  if (prim) {
-    prim.castShadow = primCastShadowEl.checked;
-    const mesh = primitivesGroup.getObjectByName(`prim:${prim.id}`);
-    if (mesh) mesh.castShadow = prim.castShadow;
-    saveTagsForWorld();
-  }
-});
-
-primReceiveShadowEl?.addEventListener("change", () => {
-  const prim = getSelectedPrimitive();
-  if (prim) {
-    prim.receiveShadow = primReceiveShadowEl.checked;
-    const mesh = primitivesGroup.getObjectByName(`prim:${prim.id}`);
-    if (mesh) mesh.receiveShadow = prim.receiveShadow;
-    saveTagsForWorld();
-  }
-});
-
-// Dimension sliders (delegated event on container)
-primDimsContainerEl?.addEventListener("input", (e) => {
-  const slider = e.target.closest("input[data-dim]");
-  if (!slider) return;
-  const key = slider.getAttribute("data-dim");
-  const cfg = PRIMITIVE_DIM_CONFIG[key] || {};
-  let val = parseFloat(slider.value);
-  if (cfg.integer) val = Math.round(val);
-  const valSpan = slider.nextElementSibling;
-  if (valSpan && key) valSpan.textContent = formatPrimitiveDimValue(key, val);
-
-  const prim = getSelectedPrimitive();
-  if (prim && key) {
-    if (!prim.dimensions) prim.dimensions = {};
-    prim.dimensions[key] = val;
-    updatePrimitiveDimensions(prim.id);
-    saveTagsForWorld();
-  }
-});
-
-primDuplicateBtn?.addEventListener("click", () => {
-  if (selectedPrimitiveId) duplicatePrimitive(selectedPrimitiveId);
-});
-
-primDeleteBtn?.addEventListener("click", () => {
-  if (selectedPrimitiveId) deletePrimitive(selectedPrimitiveId);
-});
-
-primSubtractApplyBtn?.addEventListener("click", () => {
-  const cutter = getSelectedPrimitive();
-  if (!cutter) return;
-  const explicitTargetId = primSubtractSourceEl?.value || "";
-  let targetIds = [];
-  if (explicitTargetId) {
-    if (explicitTargetId === cutter.id) return;
-    targetIds = [explicitTargetId];
-  } else {
-    targetIds = getOverlappingPrimitiveIds(cutter.id);
-  }
-  if (!targetIds.length) {
-    setStatus("No overlapping target shapes found. Place selected shape inside another and retry.");
-    return;
-  }
-  let added = 0;
-  for (const targetId of targetIds) {
-    const target = primitives.find((p) => p.id === targetId);
-    if (!target) continue;
-    if (!Array.isArray(target.cutouts)) target.cutouts = [];
-    const cutout = buildPrimitiveCutoutFromSource(target.id, cutter.id);
-    if (!cutout) continue;
-    target.cutouts.push(cutout);
-    updatePrimitiveMaterial(target.id);
-    added++;
-  }
-  if (!added) return;
-  saveTagsForWorld();
-  const deleteSource = primSubtractDeleteSourceEl?.checked === true;
-  if (deleteSource) {
-    const nextTargetId = targetIds[0] || null;
-    deletePrimitive(cutter.id);
-    if (nextTargetId) selectPrimitive(nextTargetId);
-  } else {
-    renderPrimitiveProps();
-    renderPrimitivesList();
-  }
-  setStatus(`Subtract applied to ${added} target shape${added > 1 ? "s" : ""}.`);
-});
-
-primSubtractClearBtn?.addEventListener("click", () => {
-  const target = getSelectedPrimitive();
-  if (!target) return;
-  target.cutouts = [];
-  updatePrimitiveMaterial(target.id);
-  saveTagsForWorld();
-  renderPrimitiveProps();
-  setStatus("Cutouts cleared.");
-});
-
-// Light property inputs
-lightNameEl?.addEventListener("input", () => {
-  const ld = getSelectedLight();
-  if (ld) { ld.name = lightNameEl.value; saveTagsForWorld(); renderLightsList(); }
-});
-
-lightTypeEl?.addEventListener("change", () => {
-  const ld = getSelectedLight();
-  if (!ld) return;
-  ld.type = lightTypeEl.value;
-  // Recreate the light + proxy for the new type
-  instantiateEditorLight(ld);
-  saveTagsForWorld();
-  renderLightProps();
-  // Re-attach transform controls to the proxy
-  if (ld._proxyObj) {
-    transformControls.attach(ld._proxyObj);
-  }
-});
-
-lightColorEl?.addEventListener("input", () => {
-  const ld = getSelectedLight();
-  if (ld) { ld.color = lightColorEl.value; updateEditorLightFromProps(ld); }
-});
-
-lightIntensityEl?.addEventListener("input", () => {
-  const ld = getSelectedLight();
-  if (ld) {
-    ld.intensity = parseFloat(lightIntensityEl.value);
-    if (lightIntensityValEl) lightIntensityValEl.textContent = ld.intensity.toFixed(2);
-    updateEditorLightFromProps(ld);
-  }
-});
-
-lightDistanceEl?.addEventListener("input", () => {
-  const ld = getSelectedLight();
-  if (ld) {
-    ld.distance = parseFloat(lightDistanceEl.value);
-    if (lightDistanceValEl) lightDistanceValEl.textContent = String(Math.round(ld.distance));
-    updateEditorLightFromProps(ld);
-  }
-});
-
-lightAngleEl?.addEventListener("input", () => {
-  const ld = getSelectedLight();
-  if (ld) {
-    ld.angle = parseFloat(lightAngleEl.value);
-    if (lightAngleValEl) lightAngleValEl.textContent = Math.round((ld.angle * 180) / Math.PI) + "\u00B0";
-    updateEditorLightFromProps(ld);
-  }
-});
-
-lightPenumbraEl?.addEventListener("input", () => {
-  const ld = getSelectedLight();
-  if (ld) {
-    ld.penumbra = parseFloat(lightPenumbraEl.value);
-    if (lightPenumbraValEl) lightPenumbraValEl.textContent = ld.penumbra.toFixed(2);
-    updateEditorLightFromProps(ld);
-  }
-});
-
-const lightTargetHandler = () => {
-  const ld = getSelectedLight();
-  if (ld) {
-    ld.target = {
-      x: parseFloat(lightTargetXEl?.value || 0),
-      y: parseFloat(lightTargetYEl?.value || 0),
-      z: parseFloat(lightTargetZEl?.value || 0),
-    };
-    updateEditorLightFromProps(ld);
-    // Also update proxy rotation to face the new target
-    if (ld._proxyObj && ld._lightObj) {
-      const lightPos = ld._lightObj.position.clone();
-      const targetPos = new THREE.Vector3(ld.target.x, ld.target.y, ld.target.z);
-      const dir = targetPos.sub(lightPos).normalize();
-      const up = new THREE.Vector3(0, -1, 0);
-      const q = new THREE.Quaternion().setFromUnitVectors(up, dir);
-      ld._proxyObj.quaternion.copy(q);
-      ld.rotation = { x: ld._proxyObj.rotation.x, y: ld._proxyObj.rotation.y, z: ld._proxyObj.rotation.z };
-      saveTagsForWorld();
-    }
-  }
-};
-lightTargetXEl?.addEventListener("input", lightTargetHandler);
-lightTargetYEl?.addEventListener("input", lightTargetHandler);
-lightTargetZEl?.addEventListener("input", lightTargetHandler);
-
-lightCastShadowEl?.addEventListener("change", () => {
-  const ld = getSelectedLight();
-  if (ld) { ld.castShadow = lightCastShadowEl.checked; updateEditorLightFromProps(ld); syncShadowMapEnabled(); }
-});
-
-lightDeleteBtn?.addEventListener("click", () => {
-  if (selectedLightId) deleteEditorLight(selectedLightId);
-});
-
-// Scene light property handlers
-slColorEl?.addEventListener("input", () => {
-  const sl = getSelectedSceneLight();
-  if (sl && sl.type !== "sky") {
-    sl.obj.color.set(slColorEl.value);
-  }
-});
-
-slIntensityEl?.addEventListener("input", () => {
-  const sl = getSelectedSceneLight();
-  if (!sl) return;
-  if (sl.type === "shadow_ground") {
-    // For shadow ground, this slider controls opacity
-    sl.obj.material.opacity = parseFloat(slIntensityEl.value);
-    if (slIntensityValEl) slIntensityValEl.textContent = sl.obj.material.opacity.toFixed(2);
-  } else {
-    if (sl.type === "sky") return;
-    sl.obj.intensity = parseFloat(slIntensityEl.value);
-    if (slIntensityValEl) slIntensityValEl.textContent = sl.obj.intensity.toFixed(2);
-  }
-});
-
-slGroundColorEl?.addEventListener("input", () => {
-  const sl = getSelectedSceneLight();
-  if (sl && sl.obj.isHemisphereLight) {
-    sl.obj.groundColor.set(slGroundColorEl.value);
-  }
-});
-
-slDistanceEl?.addEventListener("input", () => {
-  const sl = getSelectedSceneLight();
-  if (sl && sl.obj.isPointLight) {
-    sl.obj.distance = parseFloat(slDistanceEl.value);
-    if (slDistanceValEl) slDistanceValEl.textContent = String(Math.round(sl.obj.distance));
-  }
-});
-
-slShadowEl?.addEventListener("change", () => {
-  const sl = getSelectedSceneLight();
-  if (sl && sl.obj.castShadow !== undefined) {
-    sl.obj.castShadow = slShadowEl.checked;
-    syncShadowMapEnabled();
-  }
-});
-
-slEnabledEl?.addEventListener("change", () => {
-  const sl = getSelectedSceneLight();
-  if (sl) {
-    if (sl.type === "sky") {
-      const s = normalizeSceneSettings(sceneSettings);
-      s.sky.enabled = !!slEnabledEl.checked;
-      sceneSettings = s;
-      applySceneRgbBackground();
-    } else {
-      sl.obj.visible = slEnabledEl.checked;
-    }
-    renderSceneLightsList();
-    syncShadowMapEnabled();
-    saveTagsForWorld();
-  }
-});
-
-function updateSkySettingFromUi(mutator) {
-  const sl = getSelectedSceneLight();
-  if (!sl || sl.type !== "sky") return;
-  const s = normalizeSceneSettings(sceneSettings);
-  mutator(s.sky);
-  sceneSettings = s;
-  applySceneSkySettings();
-  applySceneRgbBackground();
-  renderSceneLightProps();
-  saveTagsForWorld();
-}
-
-slSkyTopColorEl?.addEventListener("input", () => {
-  updateSkySettingFromUi((sky) => { sky.topColor = slSkyTopColorEl.value; });
-});
-slSkyHorizonColorEl?.addEventListener("input", () => {
-  updateSkySettingFromUi((sky) => { sky.horizonColor = slSkyHorizonColorEl.value; });
-});
-slSkyBottomColorEl?.addEventListener("input", () => {
-  updateSkySettingFromUi((sky) => { sky.bottomColor = slSkyBottomColorEl.value; });
-});
-slSkyBrightnessEl?.addEventListener("input", () => {
-  updateSkySettingFromUi((sky) => { sky.brightness = parseFloat(slSkyBrightnessEl.value) || 1.0; });
-});
-slSkySoftnessEl?.addEventListener("input", () => {
-  updateSkySettingFromUi((sky) => { sky.softness = parseFloat(slSkySoftnessEl.value) || 1.0; });
-});
-slSkySunStrengthEl?.addEventListener("input", () => {
-  updateSkySettingFromUi((sky) => { sky.sunStrength = parseFloat(slSkySunStrengthEl.value) || 0.0; });
-});
-slSkySunHeightEl?.addEventListener("input", () => {
-  updateSkySettingFromUi((sky) => { sky.sunHeight = parseFloat(slSkySunHeightEl.value) || 0.0; });
-});
-
-sceneLightPropsEl?.addEventListener("keydown", (e) => e.stopPropagation());
-
-// Prevent props panel and details panel inputs from triggering global key handlers
-primPropsEl?.addEventListener("keydown", (e) => e.stopPropagation());
-lightPropsEl?.addEventListener("keydown", (e) => e.stopPropagation());
-detailsPanelEl?.addEventListener("keydown", (e) => e.stopPropagation());
-
-// Transform XYZ input handlers — apply on change (blur or Enter)
-const xformInputs = [xformPxEl, xformPyEl, xformPzEl, xformRxEl, xformRyEl, xformRzEl, xformSxEl, xformSyEl, xformSzEl];
-for (const inp of xformInputs) {
-  if (!inp) continue;
-  inp.addEventListener("change", () => applyTransformFromInputs());
-  inp.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.target.blur(); applyTransformFromInputs(); }
-  });
-}
 
 // Expose tag data for "simulation mode" consumers.
 globalThis.sparkWorld = globalThis.sparkWorld || {};
@@ -10139,142 +6288,20 @@ globalThis.sparkWorld.getWorldKey = () => worldKey;
 globalThis.sparkWorld.getTags = () => tags.slice();
 globalThis.sparkWorld.getAiAgents = () => aiAgents.map((a) => ({ id: a.id, position: a.getPosition?.() }));
 
-let isRebuildingCollision = false;
-async function rebuildCollision() {
-  if (!splatMesh) return;
-  if (isRebuildingCollision) return;
-  isRebuildingCollision = true;
-  try {
-    if (collisionSettings.mode === "glb-trimesh") {
-      setStatus("Collision mode is GLB → TriMesh. Upload a .glb for collision.");
-      return;
-    }
-    setStatus(`Rebuilding collision… (quality ${collisionSettings.quality})`);
-    await buildRapierVoxelColliderFromSplat(splatMesh);
-    setStatus(`Physics ready. (F fly, G ghost)`);
-  } finally {
-    isRebuildingCollision = false;
-  }
-}
-
-// Rebuild collision button removed - now always using GLB TriMesh
-
 function teleportPlayerTo(x, y, z) {
   if (!playerBody) return;
   playerBody.setTranslation({ x, y, z }, true);
   playerBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
 }
 
-function findSpawnInsideFromVoxels() {
-  if (!voxelGrid) return null;
-  const { NX, NY, NZ, voxel, min, occ } = voxelGrid;
-  const index = (x, y, z) => x + NX * (y + NY * z);
-
-  // Try a few X/Z candidates near the center to find an empty vertical column with headroom.
-  const candidates = [];
-  const cx = Math.floor(NX / 2);
-  const cz = Math.floor(NZ / 2);
-  for (const dx of [0, 1, -1, 2, -2, 3, -3]) {
-    for (const dz of [0, 1, -1, 2, -2, 3, -3]) {
-      const x = cx + dx;
-      const z = cz + dz;
-      if (x <= 0 || x >= NX - 1 || z <= 0 || z >= NZ - 1) continue;
-      candidates.push([x, z]);
-    }
-  }
-
-  const headroom = PLAYER_HALF_HEIGHT * 2 + PLAYER_RADIUS * 2 + 0.15;
-  const headCells = Math.max(3, Math.ceil(headroom / voxel));
-
-  for (const [x, z] of candidates) {
-    // Scan from top to bottom for the first empty stretch with enough headroom.
-    for (let y = NY - 2; y >= 1; y--) {
-      let ok = true;
-      for (let k = 0; k < headCells; k++) {
-        const yy = y + k;
-        if (yy >= NY) break;
-        if (occ[index(x, yy, z)] !== 0) {
-          ok = false;
-          break;
-        }
-      }
-      if (!ok) continue;
-
-      // world position: center of cell, then put capsule slightly above
-      const wx = min.x + (x + 0.5) * voxel;
-      const wy = min.y + (y + 0.5) * voxel + PLAYER_HALF_HEIGHT;
-      const wz = min.z + (z + 0.5) * voxel;
-      return { x: wx, y: wy, z: wz };
-    }
-  }
-  return null;
-}
-
-
-function findNearestEmptyVoxelNearWorldPos(pos) {
-  if (!voxelGrid) return null;
-  const { NX, NY, NZ, voxel, min, occ } = voxelGrid;
-  const index = (x, y, z) => x + NX * (y + NY * z);
-
-  const toCell = (v, minV, N) => Math.max(1, Math.min(N - 2, Math.floor((v - minV) / voxel)));
-
-  const sx = toCell(pos.x, min.x, NX);
-  const sy = toCell(pos.y, min.y, NY);
-  const sz = toCell(pos.z, min.z, NZ);
-
-  const headCells = Math.max(3, Math.ceil(1.8 / voxel));
-
-  // BFS-ish search in expanding Manhattan shells.
-  const maxR = 20;
-  for (let r = 0; r <= maxR; r++) {
-    for (let dx = -r; dx <= r; dx++) {
-      for (let dz = -r; dz <= r; dz++) {
-        const x = sx + dx;
-        const z = sz + dz;
-        if (x <= 0 || x >= NX - 1 || z <= 0 || z >= NZ - 1) continue;
-
-        // Scan vertically around current y (prefer staying same level).
-        for (let dy = -r; dy <= r; dy++) {
-          const y = Math.max(1, Math.min(NY - 2, sy + dy));
-          let ok = true;
-          for (let k = 0; k < headCells; k++) {
-            const yy = y + k;
-            if (yy >= NY) break;
-            if (occ[index(x, yy, z)] !== 0) {
-              ok = false;
-              break;
-            }
-          }
-          if (!ok) continue;
-          const wx = min.x + (x + 0.5) * voxel;
-          const wy = min.y + (y + 0.5) * voxel + 0.8;
-          const wz = min.z + (z + 0.5) * voxel;
-          return { x: wx, y: wy, z: wz };
-        }
-      }
-    }
-  }
-  return null;
-}
 
 function safeDisableGhost() {
-  // If we're currently inside an occupied voxel, turning collisions back on will
-  // trap the character (penetration state). Relocate to nearest empty cell first.
+  // If we're currently inside occupied geometry, turning collisions back on will
+  // trap the character (penetration state). Use Rapier query pipeline to find a safe spot.
   if (!playerBody) return setGhostMode(false);
   const p = playerBody.translation();
 
-  // 1) If we have a voxel grid, use it (fast + deterministic for splat-voxels mode).
-  if (voxelGrid) {
-    const safe = findNearestEmptyVoxelNearWorldPos({ x: p.x, y: p.y, z: p.z });
-    if (safe) {
-      teleportPlayerTo(safe.x, safe.y, safe.z);
-      setGhostMode(false);
-      setStatus("Ghost disabled (moved to nearest free space).");
-      return;
-    }
-  }
-
-  // 2) Otherwise (e.g. GLB TriMesh mode), use Rapier query pipeline to find a non-penetrating spot.
+  // Use Rapier query pipeline to find a non-penetrating spot.
   if (rapierWorld && playerCollider) {
     try {
       const shape = playerCollider.shape;
@@ -10354,68 +6381,8 @@ window.addEventListener("keydown", (e) => {
   const isTyping =
     tagName === "input" || tagName === "textarea" || tagName === "select" || e.target?.isContentEditable;
   if (!isTyping) {
-    if (e.code === "KeyM") {
-      setAppMode(appMode === "edit" ? "sim" : "edit");
-      e.preventDefault();
-    }
-    if (e.code === "KeyT") {
-      beginTagAtAim();
-      e.preventDefault();
-    }
-    if (appMode === "edit") {
-      // Transform mode uses UI buttons (Move/Rotate/Scale) to avoid conflicts with WASD.
-      if ((e.code === "Delete" || e.code === "Backspace") && !draftTag) {
-        // Delete selected primitive
-        if (selectedPrimitiveId) {
-          deletePrimitive(selectedPrimitiveId);
-          e.preventDefault();
-          return;
-        }
-        // Delete selected light
-        if (selectedLightId) {
-          deleteEditorLight(selectedLightId);
-          e.preventDefault();
-          return;
-        }
-        // Delete selected asset
-        if (selectedAssetId) {
-          const a = getSelectedAsset();
-          if (a) {
-            // remove collider
-            if (a._colliderHandle != null) {
-              try {
-                rapierWorld?.removeCollider?.(a._colliderHandle, true);
-              } catch {}
-            }
-            // remove visual
-            const obj = assetsGroup.getObjectByName(`asset:${a.id}`);
-            if (obj?.parent) obj.parent.remove(obj);
-            _assetBumpVelocities.delete(a.id);
-            assets = assets.filter((x) => x.id !== a.id);
-            selectedAssetId = null;
-            transformControls?.detach();
-            transformControls.visible = false;
-            transformControls.enabled = false;
-            saveTagsForWorld();
-            renderAssetsList();
-            setStatus("Asset deleted.");
-            e.preventDefault();
-            return;
-          }
-        }
-      }
-    }
     if (e.code === "KeyB") {
-      void spawnOrMoveAiAtAim({ createNew: appMode === "edit", ephemeral: false }).then(() => {
-        if (appMode === "edit" && aiAgents.length > 0) {
-          selectAgentInspector(aiAgents[aiAgents.length - 1].id);
-          setStatus("Agent spawned. Use Selected Agent task box on the right.");
-        }
-      });
-      e.preventDefault();
-    }
-    if ((e.code === "Delete" || e.code === "Backspace") && appMode === "edit" && !draftTag) {
-      deleteSelectedTag();
+      void spawnOrMoveAiAtAim({ createNew: false, ephemeral: false });
       e.preventDefault();
     }
   }
@@ -10497,11 +6464,6 @@ window.addEventListener("keyup", (e) => {
   if (e.code === "ShiftLeft" || e.code === "ShiftRight") keys.down = false;
 });
 
-// Optional reference ground (helps when no splat is loaded).
-grid = new THREE.GridHelper(50, 50, 0x233043, 0x121722);
-grid.position.y = 0;
-grid.visible = shouldShowEditorGuides();
-scene.add(grid);
 
 // Shadow catcher: a large transparent ground plane that only shows shadows.
 // ShadowMaterial is fully transparent where there's no shadow, so the splat
@@ -10519,565 +6481,13 @@ scene.add(shadowCatcher);
 // Add to scene lights registry so it's controllable from the editor
 sceneLights.push({ id: "_shadow_ground", label: "Shadow Ground", obj: shadowCatcher, type: "shadow_ground" });
 
-function disposeSplat(mesh) {
-  try {
-    mesh?.dispose?.();
-  } catch {
-    // ignore
-  }
-  if (mesh?.parent) mesh.parent.remove(mesh);
-}
-
-async function createSplatMeshFromFile(file) {
-  await ensureSparkLoaded();
-  ensureSparkRendererAttached();
-  const ext = file.name.toLowerCase().endsWith(".spz")
-    ? "spz"
-    : file.name.toLowerCase().endsWith(".ply")
-      ? "ply"
-      : null;
-  if (!ext) throw new Error("Unsupported file. Please upload .ply or .spz");
-
-  const bytes = new Uint8Array(await file.arrayBuffer());
-
-  // SparkJS supports multiple loading styles. We try in this order:
-  // 1) bytes-in-memory (best for uploads)
-  // 2) static load(url) if present
-  // 3) url constructor as fallback
-  //
-  // Docs refs:
-  // - https://sparkjs.dev/docs/loading-splats/
-  // - https://sparkjs.dev/docs/splat-mesh/
-  //
-  // (We keep this resilient to minor API differences across versions.)
-  try {
-    const mesh = new SplatMesh({ fileBytes: bytes, fileType: ext, fileName: file.name });
-    // Wait until splats are actually constructed/parsed.
-    if (mesh?.initialized) await mesh.initialized;
-    return mesh;
-  } catch {
-    // fall through
-  }
-
-  const blobUrl = URL.createObjectURL(file);
-  try {
-    if (typeof SplatMesh.load === "function") {
-      const mesh = await SplatMesh.load(blobUrl);
-      if (mesh?.initialized) await mesh.initialized;
-      return mesh;
-    }
-    const mesh = new SplatMesh({ url: blobUrl, fileType: ext, fileName: file.name });
-    if (mesh?.initialized) await mesh.initialized;
-    return mesh;
-  } finally {
-    // If Spark internally needs the URL for streaming, this would be too early.
-    // But for blob URLs we typically load immediately; keep the URL around a bit.
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 30_000);
-  }
-}
-
-function getSplatBounds(mesh) {
-  // Prefer Spark’s own bounds if available; otherwise use THREE’s Box3.
-  try {
-    if (typeof mesh?.getBoundingBox === "function") {
-      const b = mesh.getBoundingBox(true);
-      if (b) return b;
-    }
-  } catch {
-    // ignore
-  }
-
-  try {
-    const box = new THREE.Box3().setFromObject(mesh);
-    if (Number.isFinite(box.min.x) && Number.isFinite(box.max.x)) return box;
-  } catch {
-    // ignore
-  }
-
-  return null;
-}
-
-function frameToSplat(mesh) {
-  const box = getSplatBounds(mesh);
-  if (!box) return false;
-
-  const center = box.getCenter(new THREE.Vector3());
-  const size = box.getSize(new THREE.Vector3());
-  const radius = Math.max(size.x, size.y, size.z) * 0.5;
-
-  // Put the player near the center, slightly above.
-  controls.object.position.set(center.x, center.y + 1.7, center.z + radius * 1.2);
-
-  // Rotate to look toward the center.
-  camera.lookAt(center);
-
-  // Scale far plane so big splats don’t clip.
-  camera.far = Math.max(2000, radius * 20);
-  camera.updateProjectionMatrix();
-
-  return true;
-}
-
-fileInput?.addEventListener("change", async (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-
-  setWorldKey(file.name);
-  setStatus(`Loading ${file.name}…`);
-
-  try {
-    const mesh = await createSplatMeshFromFile(file);
-    disposeSplat(splatMesh);
-    splatMesh = mesh;
-    scene.add(splatMesh);
-    isLoadedSplat = true;
-    sparkNeedsUpdate = true;
-
-    // Now that the mesh is initialized, framing should succeed immediately.
-    frameToSplat(splatMesh);
-
-    setStatus(`Loaded ${file.name}.`);
-  } catch (err) {
-    console.error(err);
-    setStatus(err?.message || "Failed to load splat.");
-  }
-});
-
-// =============================================================================
-// LOAD PRE-CONFIGURED WORLD
-// =============================================================================
-// World loading system removed - now using /sims/ directory for scene loading
-
-window.addEventListener("resize", () => {
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.setSize(window.innerWidth, window.innerHeight, false);
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  resizeRgbdTargets();
-  rgbdMetricMaterial.uniforms.uNear.value = camera.near;
-  rgbdMetricMaterial.uniforms.uFar.value = camera.far;
-});
-
-const clock = new THREE.Clock();
-
-function renderSceneInMode(mode) {
-  const savedOverride = scene.overrideMaterial;
-  const savedBg = scene.background;
-  const savedSplat = splatMesh ? splatMesh.visible : false;
-  const savedSpark = sparkRendererMesh ? sparkRendererMesh.visible : false;
-  const savedAssets = assetsGroup.visible;
-  const savedPrims = primitivesGroup.visible;
-  const savedLights = lightsGroup.visible;
-  const savedTags = tagsGroup.visible;
-  const savedLidar = lidarVizGroup.visible;
-  const savedOverlay = rgbdPcOverlayGroup.visible;
-
-  if (mode === "rgb") {
-    scene.overrideMaterial = null;
-    if (splatMesh) splatMesh.visible = true;
-    if (sparkRendererMesh) sparkRendererMesh.visible = true;
-    assetsGroup.visible = true;
-    primitivesGroup.visible = true;
-    lightsGroup.visible = true;
-    tagsGroup.visible = false;
-    lidarVizGroup.visible = false;
-    rgbdPcOverlayGroup.visible = false;
-    scene.background = DEFAULT_SCENE_BG;
-    renderer.render(scene, camera);
-  } else if (mode === "lidar") {
-    scene.overrideMaterial = null;
-    if (splatMesh) splatMesh.visible = false;
-    if (sparkRendererMesh) sparkRendererMesh.visible = false;
-    assetsGroup.visible = false;
-    primitivesGroup.visible = false;
-    lightsGroup.visible = false;
-    tagsGroup.visible = false;
-    lidarVizGroup.visible = true;
-    rgbdPcOverlayGroup.visible = rgbdPcOverlayOnLidar && _rgbdPcOverlayLastCount > 0;
-    scene.background = RGBD_BG;
-    renderer.render(scene, camera);
-  }
-
-  scene.overrideMaterial = savedOverride;
-  scene.background = savedBg;
-  if (splatMesh) splatMesh.visible = savedSplat;
-  if (sparkRendererMesh) sparkRendererMesh.visible = savedSpark;
-  assetsGroup.visible = savedAssets;
-  primitivesGroup.visible = savedPrims;
-  lightsGroup.visible = savedLights;
-  tagsGroup.visible = savedTags;
-  lidarVizGroup.visible = savedLidar;
-  rgbdPcOverlayGroup.visible = savedOverlay;
-}
-
-function renderCompareViews() {
-  // Panel is auto-collapsed in compare mode, so we use the FULL viewport.
-  // IMPORTANT: Three.js setViewport/setScissor expect CSS pixel values, NOT
-  // framebuffer pixels. Three.js internally multiplies by devicePixelRatio.
-  const sz = renderer.getSize(new THREE.Vector2()); // CSS pixels
-  const W = sz.x;
-  const H = sz.y;
-  const halfW = Math.floor(W / 2);
-  const halfH = Math.floor(H / 2);
-
-  renderer.setScissorTest(true);
-  renderer.autoClear = false;
-
-  // Clear entire canvas to black first.
-  renderer.setViewport(0, 0, W, H);
-  renderer.setScissor(0, 0, W, H);
-  renderer.setClearColor(0x000000, 1);
-  renderer.clear(true, true, true);
-
-  // --- Top-left: RGB (Three.js y=0 is bottom, so "top" = halfH) ---
-  renderer.setViewport(0, halfH, halfW, halfH);
-  renderer.setScissor(0, halfH, halfW, halfH);
-  renderer.setClearColor(DEFAULT_SCENE_BG, 1);
-  renderer.clear(true, true, true);
-  renderSceneInMode("rgb");
-
-  // --- Top-right: RGB-D ---
-  // Offscreen metric depth passes change render targets and clobber viewport,
-  // so we must re-set viewport/scissor afterward.
-  renderRgbdMetricPassOffscreen();
-  rgbdVizMaterial.uniforms.uGrayMode.value = rgbdVizMode === "gray" ? 1.0 : 0.0;
-  renderer.setRenderTarget(null);
-  renderer.setViewport(halfW, halfH, W - halfW, halfH);
-  renderer.setScissor(halfW, halfH, W - halfW, halfH);
-  renderer.setClearColor(RGBD_BG, 1);
-  renderer.clear(true, true, true);
-  renderer.render(rgbdVizScene, rgbdPostCamera);
-
-  // --- Bottom-center: LiDAR ---
-  const lidarX = Math.floor((W - halfW) / 2);
-  renderer.setViewport(lidarX, 0, halfW, halfH);
-  renderer.setScissor(lidarX, 0, halfW, halfH);
-  renderer.setClearColor(RGBD_BG, 1);
-  renderer.clear(true, true, true);
-  renderSceneInMode("lidar");
-
-  renderer.setScissorTest(false);
-  renderer.autoClear = true;
-  renderer.setViewport(0, 0, W, H);
-  renderer.setScissor(0, 0, W, H);
-}
-
-function renderActiveView() {
-  // Safety guard: ensure shadow sampler budget before any render call.
-  // Prevents startup/frame-time shader validation failures on heavy scenes.
-  syncShadowMapEnabled();
-  if (simCompareView && appMode === "sim") {
-    renderCompareViews();
-  } else if (simSensorViewMode === "rgbd" && appMode === "sim") {
-    renderRgbdView();
-  } else {
-    renderer.render(scene, camera);
-  }
-}
-
-async function ensureRapierLoaded() {
-  if (RAPIER) return;
-  // Guard against concurrent calls: all callers share the same init promise
-  if (!_rapierInitPromise) {
-    _rapierInitPromise = _doRapierInit();
-  }
-  return _rapierInitPromise;
-}
-
-async function _doRapierInit() {
-  // Important: use the package's own init() so its internal WASM bindings get wired up correctly.
-  RAPIER = await import("@dimforge/rapier3d-compat");
-  await RAPIER.init();
-  rapierWorld = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
-  worldBody = rapierWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed());
-
-  // Player body
-  const radius = PLAYER_RADIUS;
-  const halfHeight = PLAYER_HALF_HEIGHT;
-  playerBody = rapierWorld.createRigidBody(
-    RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, 3, 0)
-  );
-  playerCollider = rapierWorld.createCollider(
-    RAPIER.ColliderDesc.capsule(halfHeight, radius).setFriction(0.0),
-    playerBody
-  );
-
-  characterController = rapierWorld.createCharacterController(0.02);
-  characterController.setSlideEnabled(true);
-  characterController.enableAutostep(0.55, 0.25, true);
-  characterController.enableSnapToGround(0.25);
-  characterController.setMaxSlopeClimbAngle(Math.PI / 3);
-  characterController.setMinSlopeSlideAngle(Math.PI / 2);
-}
-
-async function buildRapierVoxelColliderFromSplat(mesh) {
-  await ensureRapierLoaded();
-
-  if (typeof mesh.forEachSplat !== "function") {
-    setStatus("SplatMesh.forEachSplat unavailable; cannot build collider.");
-    return;
-  }
-
-  const box = getSplatBounds(mesh);
-  if (!box) return;
-
-  const min = box.min.clone();
-  const max = box.max.clone();
-  const size = box.getSize(new THREE.Vector3());
-
-  // Collision Quality slider mapping:
-  // - Higher quality => smaller voxels + thicker ellipsoids + more dilation.
-  const q = collisionSettings.quality / 100;
-  const voxelMin = 0.04;
-  const voxelMax = 0.22;
-  let voxel = voxelMax + (voxelMin - voxelMax) * q;
-
-  const maxDim = 200;
-  voxel = Math.max(voxel, size.x / maxDim, size.y / maxDim, size.z / maxDim);
-  voxel = Math.min(Math.max(voxel, voxelMin), voxelMax);
-
-  const nx = Math.max(2, Math.ceil(size.x / voxel));
-  const ny = Math.max(2, Math.ceil(size.y / voxel));
-  const nz = Math.max(2, Math.ceil(size.z / voxel));
-
-  const total = nx * ny * nz;
-  if (total > 8_000_000) {
-    voxel = Math.max(voxel, Math.cbrt((size.x * size.y * size.z) / 8_000_000));
-  }
-
-  const NX = Math.max(2, Math.ceil(size.x / voxel));
-  const NY = Math.max(2, Math.ceil(size.y / voxel));
-  const NZ = Math.max(2, Math.ceil(size.z / voxel));
-
-  const occ = new Uint8Array(NX * NY * NZ);
-
-  setStatus(`Voxelizing splat…`);
-
-  // Voxelize splats as oriented ellipsoids for consistent wall collision.
-  // Each splat is rendered as a Gaussian; for collision we treat it as an ellipsoid
-  // at ~N standard deviations to create a reasonably "solid" surface.
-  const STD = 2.0 + 4.0 * q; // 2.0..6.0 (high quality aggressively seals gaps)
-  const invQ = new THREE.Quaternion();
-  const p = new THREE.Vector3();
-  const d = new THREE.Vector3();
-  const local = new THREE.Vector3();
-
-  // Apply SplatMesh world transform to collider generation so voxels line up with rendered splats.
-  mesh.updateMatrixWorld(true);
-  const meshWorldQuat = new THREE.Quaternion();
-  const meshWorldPos = new THREE.Vector3();
-  const meshWorldScale = new THREE.Vector3();
-  mesh.matrixWorld.decompose(meshWorldPos, meshWorldQuat, meshWorldScale);
-  const worldCenter = new THREE.Vector3();
-  const worldQuat = new THREE.Quaternion();
-
-  const idxOf = (x, y, z) => x + NX * (y + NY * z);
-  const markCell = (x, y, z) => {
-    if (x < 0 || x >= NX || y < 0 || y >= NY || z < 0 || z >= NZ) return;
-    occ[idxOf(x, y, z)] = 1;
-  };
-
-  mesh.forEachSplat((i, center, scales, quat, opacity, color) => {
-    if (opacity < 0.02) return;
-
-    // Transform splat center/orientation into world space.
-    worldCenter.copy(center).applyMatrix4(mesh.matrixWorld);
-    worldQuat.copy(meshWorldQuat).multiply(quat);
-
-    // Effective radii in world units.
-    const rx = Math.max(scales.x * meshWorldScale.x * STD, voxel * 0.6);
-    const ry = Math.max(scales.y * meshWorldScale.y * STD, voxel * 0.6);
-    const rz = Math.max(scales.z * meshWorldScale.z * STD, voxel * 0.6);
-
-    // Two-sided collision: many splat captures only contain splats on ONE side of a wall.
-    // If we voxelize only around the splat center, collision works from outside but can be
-    // missing from inside. We approximate a wall normal as the axis with the smallest scale,
-    // then voxelize a few centers offset along +/- normal to make collision bidirectional.
-    const sx = Math.abs(scales.x * meshWorldScale.x);
-    const sy = Math.abs(scales.y * meshWorldScale.y);
-    const sz = Math.abs(scales.z * meshWorldScale.z);
-    const minAxis = sx <= sy && sx <= sz ? 0 : sy <= sx && sy <= sz ? 1 : 2;
-    const normalLocal =
-      minAxis === 0 ? new THREE.Vector3(1, 0, 0) : minAxis === 1 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
-    const normalWorld = normalLocal.applyQuaternion(worldQuat).normalize();
-
-    // Extrusion distance grows with quality. Clamp to avoid huge thickening.
-    const extrude = Math.min(0.6, Math.max(voxel * 2.5, 0.05 + 0.45 * q));
-    const centers = [
-      worldCenter,
-      worldCenter.clone().addScaledVector(normalWorld, extrude),
-      worldCenter.clone().addScaledVector(normalWorld, -extrude),
-    ];
-
-    // Precompute inverse rotation
-    invQ.copy(worldQuat).invert();
-    const invRx2 = 1 / (rx * rx);
-    const invRy2 = 1 / (ry * ry);
-    const invRz2 = 1 / (rz * rz);
-    const rMax = Math.max(rx, ry, rz);
-
-    for (const c0 of centers) {
-      // If the ellipsoid is smaller than a voxel, just mark the center cell.
-      if (rx < voxel && ry < voxel && rz < voxel) {
-        const x = Math.floor((c0.x - min.x) / voxel);
-        const y = Math.floor((c0.y - min.y) / voxel);
-        const z = Math.floor((c0.z - min.z) / voxel);
-        markCell(x, y, z);
-        continue;
-      }
-
-      const x0 = Math.floor((c0.x - rMax - min.x) / voxel);
-      const x1 = Math.ceil((c0.x + rMax - min.x) / voxel);
-      const y0 = Math.floor((c0.y - rMax - min.y) / voxel);
-      const y1 = Math.ceil((c0.y + rMax - min.y) / voxel);
-      const z0 = Math.floor((c0.z - rMax - min.z) / voxel);
-      const z1 = Math.ceil((c0.z + rMax - min.z) / voxel);
-
-      for (let z = z0; z <= z1; z++) {
-        if (z < 0 || z >= NZ) continue;
-        const wz = min.z + (z + 0.5) * voxel;
-        for (let y = y0; y <= y1; y++) {
-          if (y < 0 || y >= NY) continue;
-          const wy = min.y + (y + 0.5) * voxel;
-          for (let x = x0; x <= x1; x++) {
-            if (x < 0 || x >= NX) continue;
-            const wx = min.x + (x + 0.5) * voxel;
-
-            d.set(wx - c0.x, wy - c0.y, wz - c0.z);
-            local.copy(d).applyQuaternion(invQ);
-            const v =
-              local.x * local.x * invRx2 +
-              local.y * local.y * invRy2 +
-              local.z * local.z * invRz2;
-            if (v <= 1.0) occ[idxOf(x, y, z)] = 1;
-          }
-        }
-      }
-    }
-  });
-
-  // Simple dilation to thicken walls
-  const dilateIters = Math.max(2, Math.min(7, Math.round(2 + 5 * q)));
-  for (let iter = 0; iter < dilateIters; iter++) {
-    const next = occ.slice();
-    for (let z = 1; z < NZ - 1; z++) {
-      for (let y = 1; y < NY - 1; y++) {
-        for (let x = 1; x < NX - 1; x++) {
-          const idx = x + NX * (y + NY * z);
-          if (occ[idx]) continue;
-          // 26-neighborhood dilation (fills diagonal gaps too; better sealing)
-          let filled = false;
-          for (let dz = -1; dz <= 1 && !filled; dz++) {
-            for (let dy = -1; dy <= 1 && !filled; dy++) {
-              for (let dx = -1; dx <= 1; dx++) {
-                if (dx === 0 && dy === 0 && dz === 0) continue;
-                const ii = idx + dx + NX * (dy + NY * dz);
-                if (occ[ii]) {
-                  filled = true;
-                  break;
-                }
-              }
-            }
-          }
-          if (filled) next[idx] = 1;
-        }
-      }
-    }
-    occ.set(next);
-  }
-
-  setStatus(`Meshing voxels…`);
-
-  // Save voxel grid for later "teleport inside" logic.
-  voxelGrid = { NX, NY, NZ, voxel, min, occ };
-
-  // Remove previous colliders
-  if (worldBody.__voxelColliders) {
-    for (const c of worldBody.__voxelColliders) rapierWorld.removeCollider(c, true);
-  }
-  worldBody.__voxelColliders = [];
-
-  const visited = new Uint8Array(occ.length);
-  const maxColliders = 6000;
-  let colliderCount = 0;
-  const index = (x, y, z) => x + NX * (y + NY * z);
-
-  for (let z = 0; z < NZ && colliderCount < maxColliders; z++) {
-    for (let y = 0; y < NY && colliderCount < maxColliders; y++) {
-      for (let x = 0; x < NX && colliderCount < maxColliders; x++) {
-        const i0 = index(x, y, z);
-        if (!occ[i0] || visited[i0]) continue;
-
-        // expand X
-        let x1 = x;
-        while (x1 + 1 < NX && occ[index(x1 + 1, y, z)] && !visited[index(x1 + 1, y, z)]) x1++;
-        // expand Z
-        let z1 = z;
-        outerZ: while (z1 + 1 < NZ) {
-          for (let xx = x; xx <= x1; xx++) {
-            if (!occ[index(xx, y, z1 + 1)] || visited[index(xx, y, z1 + 1)]) break outerZ;
-          }
-          z1++;
-        }
-        // expand Y
-        let y1 = y;
-        outerY: while (y1 + 1 < NY) {
-          for (let zz = z; zz <= z1; zz++) {
-            for (let xx = x; xx <= x1; xx++) {
-              if (!occ[index(xx, y1 + 1, zz)] || visited[index(xx, y1 + 1, zz)]) break outerY;
-            }
-          }
-          y1++;
-        }
-
-        // mark visited
-        for (let yy = y; yy <= y1; yy++) {
-          for (let zz = z; zz <= z1; zz++) {
-            for (let xx = x; xx <= x1; xx++) {
-              visited[index(xx, yy, zz)] = 1;
-            }
-          }
-        }
-
-        // create cuboid collider
-        const sx = (x1 - x + 1) * voxel;
-        const sy = (y1 - y + 1) * voxel;
-        const sz = (z1 - z + 1) * voxel;
-        const cx = min.x + x * voxel + sx / 2;
-        const cy = min.y + y * voxel + sy / 2;
-        const cz = min.z + z * voxel + sz / 2;
-
-        const desc = RAPIER.ColliderDesc.cuboid(sx / 2, sy / 2, sz / 2)
-          .setTranslation(cx, cy, cz)
-          .setFriction(0.8);
-        const c = rapierWorld.createCollider(desc);
-        worldBody.__voxelColliders.push(c);
-        colliderCount++;
-      }
-    }
-    await new Promise((r) => requestAnimationFrame(r));
-  }
-
-  setStatus(`Collider ready (${colliderCount} boxes). Fly: ${flyMode ? "ON" : "OFF"} (F toggles).`);
-
-  // Spawn player: try inside first (ghost enabled so we don't get stuck), else above the top.
-  setGhostMode(true);
-  const inside = findSpawnInsideFromVoxels();
-  if (inside) {
-    teleportPlayerTo(inside.x, inside.y, inside.z);
-    setStatus(`Collider ready (${colliderCount} boxes). Spawned inside (ghost ON). Press G to disable ghost.`);
-  } else {
-    teleportPlayerTo((min.x + max.x) / 2, max.y + 2.5, (min.z + max.z) / 2);
-  }
-}
-
 function _hasBumpableAssets() {
   for (const a of assets) { if (a?.bumpable) return true; }
   return false;
 }
 
 function updateBumpableAssets(dt, playerPos, agentPushers = []) {
-  if (currentWorkspace !== "scene" || !playerPos || !_hasBumpableAssets()) {
+  if (!playerPos || !_hasBumpableAssets()) {
     _playerPosPrevForBumpValid = false;
     return;
   }
@@ -11441,23 +6851,11 @@ function tick() {
     avatar.visible = false;
   }
 
-  // Editor-only UI updates — skip entirely in sim mode for headless performance
-  if (appMode === "edit") {
-    if (editorSimLightingPreview) applyEditorGuideVisibility();
-    const now = performance.now();
-    if (now - _lastHintUpdate > 150) {
-      _lastHintUpdate = now;
-      updateInteractionHint();
-    }
-    updateAgentBadges();
-    updatePlacementGhost(now);
-  } else {
-    // Sim mode: only update interaction hint + badges at reduced rate
-    const now = performance.now();
-    if (now - _lastHintUpdate > 300) {
-      _lastHintUpdate = now;
-      updateInteractionHint();
-    }
+  // Update interaction hint at reduced rate
+  const now = performance.now();
+  if (now - _lastHintUpdate > 300) {
+    _lastHintUpdate = now;
+    updateInteractionHint();
   }
 
   // LiDAR / sensor overlays — run when explicitly enabled OR in dimos mode
@@ -11781,1014 +7179,6 @@ window.debugClearAssetColliders = function() {
   console.log(`[DEBUG] Cleared ${removed} asset colliders`);
 };
 
-// =============================================================================
-// VIBE CREATOR — AI-powered scene generation (edit mode)
-// =============================================================================
-function getSelectionAnchorForVibe() {
-  if (selectedPrimitiveId) {
-    const p = primitives.find((x) => x.id === selectedPrimitiveId);
-    const pos = p?.transform?.position;
-    if (pos) return { x: pos.x || 0, y: pos.y || 0, z: pos.z || 0 };
-  }
-  if (selectedAssetId) {
-    const obj = assetsGroup.getObjectByName(`asset:${selectedAssetId}`);
-    if (obj) return { x: obj.position.x || 0, y: obj.position.y || 0, z: obj.position.z || 0 };
-  }
-  if (selectedLightId) {
-    const l = editorLights.find((x) => x.id === selectedLightId);
-    const pos = l?.position;
-    if (pos) return { x: pos.x || 0, y: pos.y || 0, z: pos.z || 0 };
-  }
-  return null;
-}
-
-function getPlacementAnchorFromScreenForVibe(clientX, clientY) {
-  if (!renderer || !camera) return null;
-  const rect = renderer.domElement.getBoundingClientRect();
-  if (!rect.width || !rect.height) return null;
-  const ndc = new THREE.Vector2(
-    ((clientX - rect.left) / rect.width) * 2 - 1,
-    -((clientY - rect.top) / rect.height) * 2 + 1,
-  );
-  const raycaster = new THREE.Raycaster();
-  raycaster.setFromCamera(ndc, camera);
-  const ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-  const out = new THREE.Vector3();
-  const hit = raycaster.ray.intersectPlane(ground, out);
-  if (!hit) return null;
-  return { x: out.x, y: out.y, z: out.z };
-}
-
-function focusVibeStagingArea() {
-  if (currentWorkspace !== "assetBuilder") return;
-  camera.position.set(27, 8, 30);
-  camera.lookAt(new THREE.Vector3(27, 0, 27));
-  camera.updateMatrixWorld(true);
-  setStatus("Focused staging area.");
-}
-
-function openManualStagingEditor() {
-  switchWorkspace("assetBuilder");
-}
-
-function captureCurrentAssetThumbnailDataUrl() {
-  if (!renderer) return "";
-  try {
-    // Use an overhead camera that frames the current builder content
-    const bbox = new THREE.Box3();
-    primitivesGroup.traverse((c) => { if (c.isMesh) bbox.expandByObject(c); });
-    assetsGroup.traverse((c) => { if (c.isMesh) bbox.expandByObject(c); });
-
-    if (bbox.isEmpty()) {
-      renderer.render(scene, camera);
-      return renderer.domElement.toDataURL("image/jpeg", 0.72);
-    }
-
-    const center = bbox.getCenter(new THREE.Vector3());
-    const size = bbox.getSize(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z, 0.5);
-
-    const thumbCam = new THREE.PerspectiveCamera(45, 1, 0.05, 200);
-    thumbCam.position.set(center.x + maxDim * 0.8, center.y + maxDim * 1.0, center.z + maxDim * 0.8);
-    thumbCam.lookAt(center);
-    thumbCam.updateProjectionMatrix();
-    thumbCam.updateMatrixWorld(true);
-
-    const thumbTarget = new THREE.WebGLRenderTarget(256, 256);
-    renderer.setRenderTarget(thumbTarget);
-    renderer.render(scene, thumbCam);
-    renderer.setRenderTarget(null);
-
-    const pixels = new Uint8Array(256 * 256 * 4);
-    renderer.readRenderTargetPixels(thumbTarget, 0, 0, 256, 256, pixels);
-    thumbTarget.dispose();
-
-    const flipped = new Uint8ClampedArray(256 * 256 * 4);
-    for (let y = 0; y < 256; y++) {
-      const src = (255 - y) * 256 * 4;
-      const dst = y * 256 * 4;
-      flipped.set(pixels.subarray(src, src + 256 * 4), dst);
-    }
-    const cvs = document.createElement("canvas");
-    cvs.width = 256;
-    cvs.height = 256;
-    const ctx = cvs.getContext("2d");
-    ctx.putImageData(new ImageData(flipped, 256, 256), 0, 0);
-    return cvs.toDataURL("image/jpeg", 0.75);
-  } catch {
-    return "";
-  }
-}
-
-function readAssetLibraryRecords() {
-  if (Array.isArray(assetLibraryRuntimeCache)) {
-    return JSON.parse(JSON.stringify(assetLibraryRuntimeCache));
-  }
-  try {
-    const list = JSON.parse(localStorage.getItem(ASSET_LIBRARY_KEY) || "[]");
-    const out = Array.isArray(list) ? list : [];
-    assetLibraryRuntimeCache = JSON.parse(JSON.stringify(out));
-    return out;
-  } catch {
-    return [];
-  }
-}
-
-function compactSceneForStorage(scene, textureLimit = 500000) {
-  if (!scene || typeof scene !== "object") return scene;
-  const out = JSON.parse(JSON.stringify(scene));
-  for (const p of out.primitives || []) {
-    const m = p?.material;
-    if (!m) continue;
-    const tex = m.textureDataUrl;
-    if (typeof tex === "string" && tex.length > textureLimit) {
-      m.textureDataUrl = null;
-    }
-  }
-  return out;
-}
-
-function compactAssetLibraryForStorage(list, opts = {}) {
-  const textureLimit = Number.isFinite(opts.textureLimit) ? Number(opts.textureLimit) : 500000;
-  const lib = JSON.parse(JSON.stringify(Array.isArray(list) ? list : []));
-  for (const rec of lib) {
-    if (!rec || typeof rec !== "object") continue;
-    rec.scene = compactSceneForStorage(rec.scene, textureLimit);
-    if (Array.isArray(rec.states)) {
-      for (const st of rec.states) {
-        if (!st || typeof st !== "object") continue;
-        st.scene = compactSceneForStorage(st.scene || st.shapeScene, textureLimit);
-        if (st.shapeScene && !st.scene) st.shapeScene = undefined;
-      }
-    }
-  }
-  return lib;
-}
-
-function writeAssetLibraryRecords(list) {
-  const arr = Array.isArray(list) ? list : [];
-  assetLibraryRuntimeCache = JSON.parse(JSON.stringify(arr));
-  const attempts = [
-    arr,
-    compactAssetLibraryForStorage(arr, { textureLimit: 500000 }),
-    compactAssetLibraryForStorage(arr, { textureLimit: 250000 }),
-    compactAssetLibraryForStorage(arr, { textureLimit: 100000 }),
-  ];
-  let savedLocal = false;
-  let usedAttempt = 0;
-  let savedCount = arr.length;
-  for (let i = 0; i < attempts.length; i++) {
-    try {
-      localStorage.setItem(ASSET_LIBRARY_KEY, JSON.stringify(attempts[i]));
-      savedLocal = true;
-      usedAttempt = i;
-      savedCount = attempts[i].length;
-      break;
-    } catch (err) {
-      const msg = String(err?.name || err?.message || err);
-      if (!/QuotaExceededError/i.test(msg)) {
-        console.warn("[asset-library] localStorage write failed:", err);
-        break;
-      }
-    }
-  }
-  // Last-resort: trim oldest records (keep thumbnails on retained records).
-  if (!savedLocal) {
-    const sorted = [...arr].sort((a, b) => Number(a?.createdAt || 0) - Number(b?.createdAt || 0));
-    let candidate = compactAssetLibraryForStorage(sorted, { textureLimit: 100000 });
-    while (candidate.length > 1) {
-      candidate.shift();
-      try {
-        localStorage.setItem(ASSET_LIBRARY_KEY, JSON.stringify(candidate));
-        savedLocal = true;
-        usedAttempt = attempts.length;
-        savedCount = candidate.length;
-        break;
-      } catch (err) {
-        const msg = String(err?.name || err?.message || err);
-        if (!/QuotaExceededError/i.test(msg)) {
-          console.warn("[asset-library] localStorage trim write failed:", err);
-          break;
-        }
-      }
-    }
-  }
-  // Persist full-fidelity records to disk via server (fire-and-forget).
-  _persistAssetLibraryToDisk(arr);
-  if (!savedLocal) {
-    setStatus("Asset library is too large for browser storage. Saved to disk, but local cache could not update.");
-    // Still notify listeners with full-fidelity records so UI does not regress to placeholders.
-    window.dispatchEvent(new CustomEvent("asset-library-updated", { detail: { assets: assetLibraryRuntimeCache, source: "memory" } }));
-    renderBuilderStateEditorPanel();
-    return false;
-  }
-  if (usedAttempt > 0) {
-    if (savedCount < arr.length) {
-      setStatus(`Asset saved. Browser cache kept ${savedCount}/${arr.length} newest assets; full library saved to disk.`);
-    } else {
-      setStatus("Asset saved. Browser cache was compacted to fit storage limits.");
-    }
-  }
-  // Notify listeners with the full list so UI can prefer in-memory records over compacted cache.
-  window.dispatchEvent(new CustomEvent("asset-library-updated", { detail: { assets: assetLibraryRuntimeCache, source: "storage" } }));
-  renderBuilderStateEditorPanel();
-  return true;
-}
-
-function _persistAssetLibraryToDisk(list) {
-  const baseUrl = (localStorage.getItem("sparkWorldVlmEndpoint") || "/vlm/decision").replace("/vlm/decision", "");
-  fetch(`${baseUrl}/vlm/asset-library`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ assets: list }),
-  }).catch(() => { /* server might be offline — localStorage still has it */ });
-}
-
-window.addEventListener("asset-library-updated", (ev) => {
-  const assets = ev?.detail?.assets;
-  if (Array.isArray(assets)) {
-    assetLibraryRuntimeCache = JSON.parse(JSON.stringify(assets));
-  }
-});
-
-function showBuilderStateFeedback(msg, isError = false) {
-  const el = document.getElementById("builder-state-feedback");
-  if (!el) return;
-  el.textContent = msg || "";
-  el.style.color = isError ? "#ef4444" : "var(--text-tertiary)";
-}
-
-function getBuilderEditingAssetRecord(list = null) {
-  const lib = Array.isArray(list) ? list : readAssetLibraryRecords();
-  if (!builderEditingAssetId) return null;
-  return lib.find((x) => x.id === builderEditingAssetId) || null;
-}
-
-function getBestAssetLibraryRecordByName(list, title) {
-  const needle = String(title || "").trim().toLowerCase();
-  if (!needle) return null;
-  const matches = (Array.isArray(list) ? list : []).filter(
-    (x) => String(x?.name || "").trim().toLowerCase() === needle,
-  );
-  if (!matches.length) return null;
-  matches.sort((a, b) => Number(b?.createdAt || 0) - Number(a?.createdAt || 0));
-  return matches[0] || null;
-}
-
-function updateBuilderPrimarySaveButton() {
-  if (!builderPrimarySaveBtn) return;
-  const isVisible = currentWorkspace === "assetBuilder" && !!builderEditingAssetId;
-  builderPrimarySaveBtn.classList.toggle("hidden", !isVisible);
-  builderPrimarySaveBtn.textContent = "Save + Done";
-}
-
-async function finishBuilderEditing(saveBeforeExit = true) {
-  if (saveBeforeExit) {
-    const sid = builderEditingStateId;
-    if (sid) {
-      const snapshot = buildCurrentBuilderSceneSnapshot();
-      if (snapshot?.primitives?.length) {
-        updateBuilderEditingAssetRecord((rec) => {
-          const st = (rec.states || []).find((s) => s.id === sid);
-          if (st) st.scene = snapshot;
-          rec.scene = snapshot;
-          const thumb = captureCurrentAssetThumbnailDataUrl();
-          if (typeof thumb === "string" && thumb.startsWith("data:image/")) {
-            rec.thumbnailDataUrl = thumb;
-          }
-          rebuildActionsFromStateInteractions(rec);
-        });
-      }
-    }
-  }
-  builderEditingAssetId = null;
-  builderEditingStateId = null;
-  builderShowTypeChoice = false;
-  await importLevelFromJSON({ tags: [], primitives: [], lights: [], groups: [] });
-  renderBuilderStateEditorPanel();
-  updateBuilderPrimarySaveButton();
-  setStatus("Done editing. Builder cleared.");
-}
-
-function updateBuilderEditingAssetRecord(mutator) {
-  const list = readAssetLibraryRecords();
-  const idx = list.findIndex((x) => x.id === builderEditingAssetId);
-  if (idx === -1) return false;
-  const rec = list[idx];
-  mutator(rec);
-  list[idx] = rec;
-  return writeAssetLibraryRecords(list);
-}
-
-function renderBuilderStateEditorPanel() {
-  if (!builderStateEditorEl) return;
-  updateBuilderPrimarySaveButton();
-  const inBuilder = currentWorkspace === "assetBuilder";
-  const rec = getBuilderEditingAssetRecord();
-  if (!inBuilder) {
-    builderStateEditorEl.classList.add("hidden");
-    builderStateEditorEl.innerHTML = "";
-    return;
-  }
-  builderStateEditorEl.classList.remove("hidden");
-
-  // ── PHASE 1: No asset saved yet — just name + save ──
-  if (!rec && !builderShowTypeChoice) {
-    builderStateEditorEl.innerHTML = `
-      <details class="dt-section" open>
-        <summary class="dt-header">Save Asset</summary>
-        <div class="dt-body">
-          <div style="font-size:12px;color:var(--text-tertiary);margin-bottom:8px;">
-            Build your asset with shapes, then save it to the library.
-          </div>
-          <input id="builder-new-asset-name" class="dt-input" type="text" placeholder="Asset name (e.g. Chair, Cabinet)" value="" />
-          <div class="dt-actions" style="margin-top:4px;">
-            <button id="builder-save-to-library-btn" class="tb-btn tb-primary" type="button">Save to Library</button>
-          </div>
-          <div id="builder-state-feedback" style="font-size:12px;color:var(--text-tertiary);margin-top:6px;"></div>
-        </div>
-      </details>
-    `;
-    return;
-  }
-
-  // ── PHASE 2: Just saved — ask Static or Interactive ──
-  if (builderShowTypeChoice && rec) {
-    const esc = (s) => escapeHtml(String(s ?? ""));
-    builderStateEditorEl.innerHTML = `
-      <details class="dt-section" open>
-        <summary class="dt-header">Asset Saved</summary>
-        <div class="dt-body">
-          <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--text-primary);">
-            "${esc(rec.name)}" saved to library!
-          </div>
-          <div style="font-size:12px;color:var(--text-tertiary);margin-bottom:10px;">
-            What kind of asset is this?
-          </div>
-          <div class="dt-actions" style="flex-direction:column;gap:6px;">
-            <button id="builder-choose-static-btn" class="tb-btn" type="button" style="width:100%;text-align:left;padding:6px 8px;white-space:normal;line-height:1.35;">
-              <strong>Static</strong> — Done!
-            </button>
-            <button id="builder-choose-interactive-btn" class="tb-btn tb-primary" type="button" style="width:100%;text-align:left;padding:6px 8px;white-space:normal;line-height:1.35;">
-              <strong>Interactive</strong> — Add states (open/closed)
-            </button>
-          </div>
-          <div id="builder-state-feedback" style="font-size:12px;color:var(--text-tertiary);margin-top:8px;"></div>
-        </div>
-      </details>
-    `;
-    return;
-  }
-
-  // ── PHASE 3: Interactive state editing ──
-  if (!rec) {
-    builderStateEditorEl.innerHTML = "";
-    return;
-  }
-  const states = Array.isArray(rec.states) ? rec.states : [];
-  const currentId = rec.currentStateId || states[0]?.id || "";
-  const editingId = builderEditingStateId || currentId;
-  const selectedState = states.find((s) => s.id === editingId) || states[0] || null;
-  const selectedStateId = selectedState?.id || "";
-  const esc = (s) => escapeHtml(String(s ?? ""));
-  const renderStateOptions = () =>
-    states.map((s) => `<option value="${esc(s.id)}"${selectedStateId === s.id ? " selected" : ""}>${esc(s.name || s.id)}</option>`).join("");
-  const renderInteractionTargetOptions = (currentTo) =>
-    states
-      .filter((s) => s.id !== selectedStateId)
-      .map((s) => `<option value="${esc(s.id)}"${currentTo === s.id ? " selected" : ""}>${esc(s.name || s.id)}</option>`)
-      .join("");
-  const selectedInteractions = Array.isArray(selectedState?.interactions) ? selectedState.interactions : [];
-  const interactionRowsHtml = selectedInteractions.length
-    ? selectedInteractions.map((it) => `
-        <div class="builder-interaction-row dt-row" data-interaction-id="${esc(it.id)}" style="margin-bottom:4px;align-items:center;">
-          <input class="dt-input builder-transition-label" type="text" data-field="builder-ilabel" value="${esc(it.label || "toggle")}" placeholder="Action label (e.g. Open left drawer)" />
-          <select class="dt-select builder-transition-target" data-field="builder-ito">
-            ${renderInteractionTargetOptions(it.to)}
-          </select>
-          <button class="tb-btn tb-danger builder-transition-remove" type="button" data-action="builder-remove-interaction" title="Remove this transition">Remove</button>
-        </div>
-      `).join("")
-    : `<div style="font-size:11px;color:var(--text-tertiary);margin-bottom:6px;">No custom transitions yet for this state.</div>`;
-  builderStateEditorEl.innerHTML = `
-    <details class="dt-section" open>
-      <summary class="dt-header">Editing: ${esc(rec.name)}</summary>
-      <div class="dt-body">
-        <div style="font-size:12px;color:var(--text-tertiary);margin-bottom:8px;">
-          Modify shapes to create a new look, then save it as a new state.
-          States cycle with <strong>E</strong> in sim mode.
-        </div>
-        <input id="builder-asset-name" class="dt-input" type="text" value="${esc(rec.name || "")}" placeholder="Asset name" />
-        <label class="prop-check"><input id="builder-asset-pickable" type="checkbox" ${rec.pickable ? "checked" : ""} /><span>Pickable in sim</span></label>
-        <label class="prop-check"><input id="builder-asset-bumpable" type="checkbox" ${rec.bumpable ? "checked" : ""} /><span>Bump-movable in sim</span></label>
-        <div id="builder-bump-controls" class="${rec.bumpable ? "" : "hidden"}" style="padding:6px 8px;background:var(--surface-1);border-radius:8px;margin-bottom:6px;">
-          <div class="slider"><span class="slider-label">Push Response</span><input id="builder-asset-bump-response" type="range" min="0.1" max="2.0" step="0.05" value="${Number(rec.bumpResponse ?? 0.9).toFixed(2)}" /><span id="builder-asset-bump-response-val" class="slider-value">${Number(rec.bumpResponse ?? 0.9).toFixed(2)}</span></div>
-          <div class="slider"><span class="slider-label">Friction</span><input id="builder-asset-bump-damping" type="range" min="0.70" max="0.99" step="0.01" value="${Number(rec.bumpDamping ?? 0.9).toFixed(2)}" /><span id="builder-asset-bump-damping-val" class="slider-value">${Number(rec.bumpDamping ?? 0.9).toFixed(2)}</span></div>
-        </div>
-        <label class="prop-check"><input id="builder-auto-cycle" type="checkbox" ${rec.autoCycle !== false ? "checked" : ""} /><span>Auto-cycle states on interact (E)</span></label>
-        <div style="font-size:11px;color:var(--text-tertiary);margin:-2px 0 6px 22px;">
-          Turn this off to create custom transitions (e.g. closed -> half-open -> open).
-        </div>
-        <hr style="border:none;border-top:1px solid var(--border);margin:8px 0;" />
-        <div style="font-size:12px;font-weight:600;margin-bottom:4px;">States (${states.length})</div>
-        <div class="dt-row" style="margin-bottom:4px;">
-          <select id="builder-state-select" class="dt-select" style="flex:1;">${renderStateOptions()}</select>
-          <button id="builder-load-selected-state-btn" class="tb-btn" type="button" title="Load this state into the builder">Load</button>
-        </div>
-        <input id="builder-state-name" class="dt-input" type="text" value="${esc(selectedState?.name || "")}" placeholder="Rename this state" />
-        <div class="dt-actions" style="margin-top:2px;margin-bottom:6px;">
-          <button id="builder-save-current-state-btn" class="tb-btn" type="button" title="Overwrite this state with current shapes">Update State</button>
-          <button id="builder-delete-selected-state-btn" class="tb-btn tb-danger" type="button" ${states.length <= 1 ? "disabled" : ""}>Delete</button>
-        </div>
-        <div style="font-size:12px;font-weight:600;margin-bottom:4px;">Transitions from "${esc(selectedState?.name || "state")}"</div>
-        ${rec.autoCycle !== false
-          ? `<div style="font-size:11px;color:var(--text-tertiary);margin-bottom:6px;">Auto-cycle is on. Any manual transition edit/removal will switch to custom mode.</div>`
-          : ``}
-        ${interactionRowsHtml}
-        <div class="dt-actions" style="margin-top:2px;margin-bottom:6px;">
-          <button id="builder-add-interaction-btn" class="tb-btn" type="button" ${states.length <= 1 ? "disabled" : ""}>+ Add Transition</button>
-          <button id="builder-clear-interactions-btn" class="tb-btn tb-danger" type="button" ${(selectedInteractions.length === 0 || states.length <= 1) ? "disabled" : ""}>Clear All</button>
-        </div>
-        <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;" />
-        <div style="font-size:12px;font-weight:600;margin-bottom:4px;">Add New State</div>
-        <div style="font-size:11px;color:var(--text-tertiary);margin-bottom:4px;">
-          Modify the shapes above, name the new look, then save.
-        </div>
-        <input id="builder-new-state-name" class="dt-input" type="text" value="" placeholder="New state name (e.g. open)" />
-        <div class="dt-actions" style="margin-top:2px;margin-bottom:6px;">
-          <button id="builder-create-state-btn" class="tb-btn tb-primary" type="button" title="Save current shapes as a brand new state">+ Save as New State</button>
-        </div>
-        <div id="builder-state-feedback" style="font-size:12px;color:var(--text-tertiary);margin-bottom:4px;"></div>
-        <button id="builder-done-editing-btn" class="tb-btn" type="button" style="width:100%;margin-top:4px;">Done Editing</button>
-      </div>
-    </details>
-  `;
-}
-
-function buildCurrentBuilderSceneSnapshot() {
-  const cleanPrimitives = primitives.map((p) => {
-    const { _colliderHandle, ...rest } = p;
-    return rest;
-  });
-  const cleanLights = editorLights.map((l) => {
-    const { _lightObj, _helperObj, _proxyObj, ...rest } = l;
-    return rest;
-  });
-  return { tags: [], primitives: cleanPrimitives, lights: cleanLights, groups: [...groups] };
-}
-
-function publishCurrentSceneToStagingQueue(name = "Manual staged asset") {
-  const currentScene = buildCurrentBuilderSceneSnapshot();
-  const defaultStateId = "state-default";
-  const payload = {
-    id: `lib-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
-    name,
-    prompt: "Manually authored in asset builder",
-    createdAt: Date.now(),
-    thumbnailDataUrl: captureCurrentAssetThumbnailDataUrl(),
-    scene: currentScene,
-    states: [{ id: defaultStateId, name: "default", scene: currentScene, interactions: [] }],
-    currentStateId: defaultStateId,
-    actions: [],
-    autoCycle: true,
-    pickable: false,
-    bumpable: false,
-    bumpResponse: 0.9,
-    bumpDamping: 0.9,
-  };
-  const existing = readAssetLibraryRecords();
-  existing.push(payload);
-  writeAssetLibraryRecords(existing);
-  builderEditingAssetId = payload.id;
-  builderEditingStateId = defaultStateId;
-  builderShowTypeChoice = false;
-  setStatus(`Saved asset to library: ${name}`);
-}
-
-function rebuildActionsFromStateInteractions(record) {
-  const states = Array.isArray(record.states) ? record.states : [];
-  const autoCycle = record.autoCycle !== false;
-  if (autoCycle) {
-    for (let i = 0; i < states.length; i++) {
-      const s = states[i];
-      s.interactions = [];
-      if (states.length <= 1) continue;
-      const next = states[(i + 1) % states.length];
-      s.interactions.push({
-        id: `cycle-${s.id}-to-${next.id}`,
-        label: `to ${next.name || "next"}`,
-        to: next.id,
-      });
-    }
-  } else {
-    for (const s of states) {
-      s.interactions = Array.isArray(s.interactions) ? s.interactions : [];
-    }
-  }
-  const actionMap = new Map();
-  for (const s of states) {
-    for (const it of s.interactions || []) {
-      if (!it?.to || !states.some((x) => x.id === it.to)) continue;
-      const id = it.id || `act-${s.id}-to-${it.to}`;
-      actionMap.set(id, { id, label: it.label || "toggle", from: s.id, to: it.to });
-    }
-  }
-  record.actions = [...actionMap.values()];
-}
-
-// Phase 1 save: create asset in library with one default state, then show type choice.
-function saveBuilderAssetToLibrary() {
-  const snapshot = buildCurrentBuilderSceneSnapshot();
-  const hasGeometry = Array.isArray(snapshot.primitives) && snapshot.primitives.length > 0;
-  if (!hasGeometry) {
-    setStatus("Builder is empty. Add shapes before saving.");
-    showBuilderStateFeedback("Add at least one shape first.", true);
-    return;
-  }
-  const assetName = (document.getElementById("builder-new-asset-name")?.value?.trim()) || "";
-  if (!assetName) {
-    showBuilderStateFeedback("Please enter an asset name.", true);
-    return;
-  }
-  const stateId = `state-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-  const payload = {
-    id: `lib-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
-    name: assetName,
-    prompt: "",
-    createdAt: Date.now(),
-    thumbnailDataUrl: captureCurrentAssetThumbnailDataUrl(),
-    scene: snapshot,
-    states: [{ id: stateId, name: "default", scene: snapshot, interactions: [] }],
-    currentStateId: stateId,
-    actions: [],
-    autoCycle: false,
-    pickable: false,
-    bumpable: false,
-    bumpResponse: 0.9,
-    bumpDamping: 0.9,
-  };
-  const existing = readAssetLibraryRecords();
-  existing.push(payload);
-  writeAssetLibraryRecords(existing);
-  builderEditingAssetId = payload.id;
-  builderEditingStateId = stateId;
-  builderShowTypeChoice = true;
-  renderBuilderStateEditorPanel();
-  setStatus(`Asset "${assetName}" saved to library.`);
-}
-
-// Phase 2 → Static: asset is done, clear builder.
-function finalizeAssetAsStatic() {
-  builderShowTypeChoice = false;
-  builderEditingAssetId = null;
-  builderEditingStateId = null;
-  importLevelFromJSON({ tags: [], primitives: [], lights: [], groups: [] });
-  renderBuilderStateEditorPanel();
-  setStatus("Static asset saved. Builder cleared for next asset.");
-}
-
-// Phase 2 → Interactive: keep asset loaded, rename default state, show state editor.
-function finalizeAssetAsInteractive() {
-  builderShowTypeChoice = false;
-  const rec = getBuilderEditingAssetRecord();
-  if (rec) {
-    rec.autoCycle = true;
-    const firstState = (rec.states || [])[0];
-    if (firstState && firstState.name === "default") firstState.name = "closed";
-    rebuildActionsFromStateInteractions(rec);
-    const list = readAssetLibraryRecords();
-    const idx = list.findIndex((x) => x.id === rec.id);
-    if (idx !== -1) { list[idx] = rec; writeAssetLibraryRecords(list); }
-  }
-  renderBuilderStateEditorPanel();
-  setStatus("Now modify the shapes and save additional states.");
-}
-
-// Phase 3: add a new state to the currently-editing interactive asset.
-function saveCurrentBuilderSceneAsNewState() {
-  const existing = readAssetLibraryRecords();
-  const snapshot = buildCurrentBuilderSceneSnapshot();
-  if (!snapshot.primitives?.length) {
-    showBuilderStateFeedback("Builder is empty. Add at least one shape.", true);
-    return;
-  }
-  if (!builderEditingAssetId) {
-    showBuilderStateFeedback("No asset being edited.", true);
-    return;
-  }
-  const target = existing.find((x) => x.id === builderEditingAssetId) || null;
-  if (!target) {
-    showBuilderStateFeedback("Asset not found in library.", true);
-    return;
-  }
-  const typedStateName = document.getElementById("builder-new-state-name")?.value?.trim();
-  if (!typedStateName) {
-    showBuilderStateFeedback("Enter a name for the new state (e.g. open).", true);
-    return;
-  }
-  const states = Array.isArray(target.states) ? target.states : [];
-  const existingNames = new Set(states.map((s) => String(s?.name || "").toLowerCase()));
-  let stateName = typedStateName;
-  if (existingNames.has(stateName.toLowerCase())) {
-    let n = 2;
-    while (existingNames.has(`${typedStateName} ${n}`.toLowerCase())) n++;
-    stateName = `${typedStateName} ${n}`;
-  }
-  const newStateId = `state-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-  states.push({ id: newStateId, name: stateName, scene: snapshot, interactions: [] });
-  target.states = states;
-  if (typeof target.autoCycle !== "boolean") target.autoCycle = true;
-  rebuildActionsFromStateInteractions(target);
-  target.currentStateId = target.currentStateId || states[0]?.id || newStateId;
-  target.scene = snapshot;
-  const thumb = captureCurrentAssetThumbnailDataUrl();
-  if (typeof thumb === "string" && thumb.startsWith("data:image/")) {
-    target.thumbnailDataUrl = thumb;
-  }
-  writeAssetLibraryRecords(existing);
-  builderEditingAssetId = target.id;
-  builderEditingStateId = newStateId;
-  renderBuilderStateEditorPanel();
-  setStatus(`Saved new state "${stateName}" for ${target.name}.`);
-  showBuilderStateFeedback(`Saved state "${stateName}".`);
-}
-
-async function openLibraryAssetInBuilder(assetRecord) {
-  const rec = assetRecord || null;
-  if (!rec) return;
-  const states = Array.isArray(rec.states) ? rec.states : [];
-  const currentStateId = rec.currentStateId || states[0]?.id || null;
-  const st = states.find((s) => s.id === currentStateId) || states[0] || null;
-  const scenePayload = st?.scene || st?.shapeScene || rec.scene;
-  if (!scenePayload) return;
-  await switchWorkspace("assetBuilder");
-  await importLevelFromJSON(scenePayload);
-  builderEditingAssetId = rec.id || null;
-  builderEditingStateId = currentStateId || st?.id || null;
-  builderShowTypeChoice = false;
-  renderBuilderStateEditorPanel();
-  setStatus(`Editing asset in builder: ${rec.name || "asset"} (${st?.name || "state"})`);
-}
-
-async function editSelectedAssetStatesInBuilder() {
-  const a = getSelectedAsset();
-  if (!a) return;
-  const list = readAssetLibraryRecords();
-  let rec = null;
-  if (a.libraryAssetId) rec = list.find((x) => x.id === a.libraryAssetId) || null;
-  if (!rec) {
-    rec = getBestAssetLibraryRecordByName(list, a.title);
-  }
-  if (!rec) {
-    setStatus("This asset is not linked to a library record. Save it to library first.");
-    return;
-  }
-  await openLibraryAssetInBuilder(rec);
-}
-
-builderStateEditorEl?.addEventListener("input", (e) => {
-  if (!builderEditingAssetId) return;
-  const t = e.target;
-  const irow = t.closest?.(".builder-interaction-row");
-  if (irow && t.getAttribute?.("data-field") === "builder-ilabel") {
-    const iid = irow.getAttribute("data-interaction-id");
-    if (!iid) return;
-    updateBuilderEditingAssetRecord((rec) => {
-      rec.autoCycle = false;
-      const sid = builderEditingStateId || rec.currentStateId || rec.states?.[0]?.id;
-      const st = (rec.states || []).find((s) => s.id === sid);
-      if (!st) return;
-      st.interactions = Array.isArray(st.interactions) ? st.interactions : [];
-      const it = st.interactions.find((x) => x.id === iid);
-      if (it) it.label = t.value;
-      rebuildActionsFromStateInteractions(rec);
-    });
-    return;
-  }
-  if (t.id === "builder-asset-name") {
-    updateBuilderEditingAssetRecord((rec) => { rec.name = t.value.trim() || rec.name; });
-    return;
-  }
-  if (t.id === "builder-state-name") {
-    const sid = builderEditingStateId;
-    if (!sid) return;
-    updateBuilderEditingAssetRecord((rec) => {
-      const st = (rec.states || []).find((s) => s.id === sid);
-      if (st) st.name = t.value.trim() || st.name;
-      rebuildActionsFromStateInteractions(rec);
-    });
-    return;
-  }
-  if (t.id === "builder-asset-bump-response") {
-    const v = parseFloat(t.value) || 0.9;
-    const valEl = document.getElementById("builder-asset-bump-response-val");
-    if (valEl) valEl.textContent = v.toFixed(2);
-    return;
-  }
-  if (t.id === "builder-asset-bump-damping") {
-    const v = parseFloat(t.value) || 0.9;
-    const valEl = document.getElementById("builder-asset-bump-damping-val");
-    if (valEl) valEl.textContent = v.toFixed(2);
-  }
-});
-
-builderStateEditorEl?.addEventListener("change", async (e) => {
-  if (!builderEditingAssetId) return;
-  const t = e.target;
-  const irow = t.closest?.(".builder-interaction-row");
-  if (irow && t.getAttribute?.("data-field") === "builder-ito") {
-    const iid = irow.getAttribute("data-interaction-id");
-    if (!iid) return;
-    updateBuilderEditingAssetRecord((rec) => {
-      rec.autoCycle = false;
-      const sid = builderEditingStateId || rec.currentStateId || rec.states?.[0]?.id;
-      const st = (rec.states || []).find((s) => s.id === sid);
-      if (!st) return;
-      st.interactions = Array.isArray(st.interactions) ? st.interactions : [];
-      const it = st.interactions.find((x) => x.id === iid);
-      if (it) it.to = t.value;
-      rebuildActionsFromStateInteractions(rec);
-    });
-    return;
-  }
-  if (t.id === "builder-asset-pickable") {
-    updateBuilderEditingAssetRecord((rec) => { rec.pickable = !!t.checked; });
-    return;
-  }
-  if (t.id === "builder-auto-cycle") {
-    updateBuilderEditingAssetRecord((rec) => {
-      rec.autoCycle = !!t.checked;
-      rebuildActionsFromStateInteractions(rec);
-    });
-    renderBuilderStateEditorPanel();
-    return;
-  }
-  if (t.id === "builder-asset-bumpable") {
-    updateBuilderEditingAssetRecord((rec) => { rec.bumpable = !!t.checked; });
-    renderBuilderStateEditorPanel();
-    return;
-  }
-  if (t.id === "builder-asset-bump-response") {
-    const v = parseFloat(t.value) || 0.9;
-    updateBuilderEditingAssetRecord((rec) => { rec.bumpResponse = v; });
-    const valEl = document.getElementById("builder-asset-bump-response-val");
-    if (valEl) valEl.textContent = v.toFixed(2);
-    return;
-  }
-  if (t.id === "builder-asset-bump-damping") {
-    const v = parseFloat(t.value) || 0.9;
-    updateBuilderEditingAssetRecord((rec) => { rec.bumpDamping = v; });
-    const valEl = document.getElementById("builder-asset-bump-damping-val");
-    if (valEl) valEl.textContent = v.toFixed(2);
-    return;
-  }
-  if (t.id === "builder-state-select") {
-    builderEditingStateId = t.value || null;
-    renderBuilderStateEditorPanel();
-    return;
-  }
-});
-
-builderStateEditorEl?.addEventListener("click", async (e) => {
-  const btn = e.target.closest?.("button");
-  if (!btn) return;
-  if (btn.id === "builder-add-interaction-btn") {
-    updateBuilderEditingAssetRecord((rec) => {
-      const sid = builderEditingStateId || rec.currentStateId || rec.states?.[0]?.id;
-      const st = (rec.states || []).find((s) => s.id === sid);
-      if (!st) return;
-      st.interactions = Array.isArray(st.interactions) ? st.interactions : [];
-      const fallbackTo = (rec.states || []).find((s) => s.id !== sid)?.id || sid;
-      const iid = `it-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-      st.interactions.push({ id: iid, label: "toggle", to: fallbackTo });
-      // Adding custom transitions implies non-cycling behavior.
-      rec.autoCycle = false;
-      rebuildActionsFromStateInteractions(rec);
-    });
-    renderBuilderStateEditorPanel();
-    return;
-  }
-  if (btn.id === "builder-clear-interactions-btn") {
-    updateBuilderEditingAssetRecord((rec) => {
-      rec.autoCycle = false;
-      const sid = builderEditingStateId || rec.currentStateId || rec.states?.[0]?.id;
-      const st = (rec.states || []).find((s) => s.id === sid);
-      if (!st) return;
-      st.interactions = [];
-      rebuildActionsFromStateInteractions(rec);
-    });
-    renderBuilderStateEditorPanel();
-    return;
-  }
-  if (btn.getAttribute?.("data-action") === "builder-remove-interaction") {
-    const row = btn.closest?.(".builder-interaction-row");
-    const iid = row?.getAttribute?.("data-interaction-id");
-    if (!iid) return;
-    updateBuilderEditingAssetRecord((rec) => {
-      rec.autoCycle = false;
-      const sid = builderEditingStateId || rec.currentStateId || rec.states?.[0]?.id;
-      const st = (rec.states || []).find((s) => s.id === sid);
-      if (!st) return;
-      st.interactions = (st.interactions || []).filter((x) => x.id !== iid);
-      rebuildActionsFromStateInteractions(rec);
-    });
-    renderBuilderStateEditorPanel();
-    return;
-  }
-
-  // Phase 1: initial save
-  if (btn.id === "builder-save-to-library-btn") {
-    saveBuilderAssetToLibrary();
-    return;
-  }
-
-  // Phase 2: static or interactive choice
-  if (btn.id === "builder-choose-static-btn") {
-    finalizeAssetAsStatic();
-    return;
-  }
-  if (btn.id === "builder-choose-interactive-btn") {
-    finalizeAssetAsInteractive();
-    return;
-  }
-
-  // Phase 3: state editing
-  if (btn.id === "builder-load-selected-state-btn") {
-    const sid = document.getElementById("builder-state-select")?.value || builderEditingStateId;
-    if (!sid) return;
-    const rec = getBuilderEditingAssetRecord();
-    const st = (rec?.states || []).find((s) => s.id === sid);
-    if (!st?.scene && !st?.shapeScene) return;
-    await importLevelFromJSON(st.scene || st.shapeScene);
-    builderEditingStateId = sid;
-    renderBuilderStateEditorPanel();
-    showBuilderStateFeedback(`Loaded state "${st.name || sid}".`);
-    return;
-  }
-  if (btn.id === "builder-save-current-state-btn") {
-    const sid = builderEditingStateId;
-    if (!sid) return;
-    const snapshot = buildCurrentBuilderSceneSnapshot();
-    if (!snapshot.primitives?.length) {
-      showBuilderStateFeedback("Builder is empty. Add shapes first.", true);
-      return;
-    }
-    updateBuilderEditingAssetRecord((rec) => {
-      const st = (rec.states || []).find((s) => s.id === sid);
-      if (st) st.scene = snapshot;
-      // Keep top-level scene in sync for compatibility with legacy readers.
-      rec.scene = snapshot;
-      const thumb = captureCurrentAssetThumbnailDataUrl();
-      if (typeof thumb === "string" && thumb.startsWith("data:image/")) {
-        rec.thumbnailDataUrl = thumb;
-      }
-      rebuildActionsFromStateInteractions(rec);
-    });
-    showBuilderStateFeedback("State updated.");
-    return;
-  }
-  if (btn.id === "builder-create-state-btn") {
-    saveCurrentBuilderSceneAsNewState();
-    return;
-  }
-  if (btn.id === "builder-delete-selected-state-btn") {
-    const sid = builderEditingStateId;
-    if (!sid) return;
-    updateBuilderEditingAssetRecord((rec) => {
-      rec.states = (rec.states || []).filter((s) => s.id !== sid);
-      if (!rec.states.length) return;
-      if (rec.currentStateId === sid) rec.currentStateId = rec.states[0].id;
-      builderEditingStateId = rec.states[0].id;
-      rebuildActionsFromStateInteractions(rec);
-    });
-    return;
-  }
-  if (btn.id === "builder-done-editing-btn") {
-    await finishBuilderEditing(true);
-    return;
-  }
-});
-
-async function spawnShapeLibraryAsset(assetRecord, opts = {}) {
-  const rec = assetRecord || {};
-  const states = Array.isArray(rec.states) && rec.states.length > 0
-    ? rec.states
-    : [{ id: "state-default", name: "default", scene: rec.blueprint || rec.scene || { tags: [], primitives: [], lights: [], groups: [] }, interactions: [] }];
-  const currentStateId = rec.currentStateId || states[0]?.id || "state-default";
-  const actions = Array.isArray(rec.actions) ? rec.actions : [];
-  const placement = getPlacementAtCrosshair({ raycastDistance: 500, surfaceOffset: 0.02 });
-  const explicitTarget = Number.isFinite(opts.targetX) && Number.isFinite(opts.targetZ);
-  const anchor = explicitTarget
-    ? {
-        x: Number(opts.targetX),
-        y: Number.isFinite(opts.targetY) ? Number(opts.targetY) : 0,
-        z: Number(opts.targetZ),
-      }
-    : placement.position;
-  const id = randId();
-  const newAsset = normalizeAsset({
-    id,
-    title: rec.name || "Shape Asset",
-    notes: rec.prompt || "",
-    states,
-    currentStateId,
-    actions,
-    transform: {
-      position: { x: anchor.x || 0, y: anchor.y || 0, z: anchor.z || 0 },
-      rotation: { x: 0, y: 0, z: 0 },
-      scale: { x: 1, y: 1, z: 1 },
-    },
-    pickable: rec.pickable === true,
-    bumpable: rec.bumpable === true,
-    bumpResponse: Number.isFinite(rec.bumpResponse) ? rec.bumpResponse : 0.9,
-    bumpDamping: Number.isFinite(rec.bumpDamping) ? rec.bumpDamping : 0.9,
-    libraryAssetId: rec.id || null,
-    castShadow: false,
-    receiveShadow: false,
-  });
-  assets.push(newAsset);
-  await instantiateAsset(newAsset);
-  saveTagsForWorld();
-  renderAssetsList();
-  selectAsset(newAsset.id);
-  return newAsset.id;
-}
-
-assetBuilderGrid = new THREE.GridHelper(80, 80, 0x2b2f38, 0x1f232b);
-assetBuilderGrid.position.set(0, 0.001, 0);
-assetBuilderGrid.visible = false;
-scene.add(assetBuilderGrid);
-
-// Inline shape palette for builder mode (replaces dropdown in builder)
-const toolbar = document.getElementById("overlay-top");
-if (toolbar) {
-  const shapeBar = document.createElement("div");
-  shapeBar.className = "builder-shape-bar hidden";
-  shapeBar.id = "builder-shape-bar";
-  const shapes = [
-    { type: "box", icon: "▢", label: "Box" },
-    { type: "sphere", icon: "●", label: "Sphere" },
-    { type: "cylinder", icon: "⬡", label: "Cyl" },
-    { type: "cone", icon: "△", label: "Cone" },
-    { type: "torus", icon: "◎", label: "Torus" },
-    { type: "plane", icon: "▬", label: "Plane" },
-  ];
-  for (const s of shapes) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "tb-btn";
-    btn.title = `Add ${s.label}`;
-    btn.innerHTML = `<span class="shape-icon">${s.icon}</span>${s.label}`;
-    btn.addEventListener("click", () => addPrimitiveAtCrosshair(s.type));
-    shapeBar.appendChild(btn);
-  }
-  // Insert the shape bar right after the transform tools
-  const transformTools = document.getElementById("asset-transform-tools");
-  if (transformTools?.nextSibling) toolbar.insertBefore(shapeBar, transformTools.nextSibling.nextSibling);
-  else toolbar.appendChild(shapeBar);
-}
-// Legacy toolbar save buttons — kept as hidden DOM anchors for backward compat
-if (toolbar && !document.getElementById("staging-publish-asset-btn")) {
-  const sep = document.createElement("div");
-  sep.className = "tb-sep hidden";
-  sep.id = "staging-publish-sep";
-  const btn = document.createElement("button");
-  btn.id = "staging-publish-asset-btn";
-  btn.type = "button";
-  btn.className = "tb-btn hidden";
-  const stateBtn = document.createElement("button");
-  stateBtn.id = "staging-save-state-btn";
-  stateBtn.type = "button";
-  stateBtn.className = "tb-btn hidden";
-  toolbar.appendChild(sep);
-  toolbar.appendChild(btn);
-  toolbar.appendChild(stateBtn);
-}
-if (toolbar && !document.getElementById("builder-primary-save-btn")) {
-  const btn = document.createElement("button");
-  btn.id = "builder-primary-save-btn";
-  btn.type = "button";
-  btn.className = "tb-btn tb-primary hidden";
-  btn.style.marginLeft = "auto";
-  btn.style.fontWeight = "700";
-  btn.style.border = "1px solid rgba(255,255,255,0.35)";
-  btn.style.boxShadow = "0 0 0 2px rgba(59,130,246,0.25)";
-  btn.textContent = "Save + Done";
-  btn.addEventListener("click", async () => {
-    if (!builderEditingAssetId || currentWorkspace !== "assetBuilder") return;
-    await finishBuilderEditing(true);
-  });
-  toolbar.appendChild(btn);
-  builderPrimarySaveBtn = btn;
-}
-updateWorkspaceTabUi();
-updateBuilderPrimarySaveButton();
-if (isStagingEditor) {
-  setTimeout(() => { switchWorkspace("assetBuilder"); }, 0);
-}
-
-// DimSim is sim-only; editor asset-creation pipeline is disabled.
-vibeCreatorApi = null;
 // ── dimos integration mode boot ──────────────────────────────────────────────
 // When dimosMode is active, auto-load a scene and spawn an agent, then connect
 // the LCM bridge so sensor data flows and external /odom drives the agent.
@@ -12812,6 +7202,7 @@ if (dimosMode) {
       // Place agent at a default spawn point
       const spawnPos = sceneJson.dimosSpawnPoint || { x: 2, y: 0.5, z: 3 };
       agent.setPosition(spawnPos.x, spawnPos.y, spawnPos.z);
+      renderAgentTaskUi(); // update UI: hide spawn button, enable task controls
       // Track yaw independently — reading from group.rotation.y (Three.js Euler)
       // can return stale/zero values during internal matrix recomposition.
       let _dimosYaw = 0;
@@ -12983,8 +7374,6 @@ if (dimosMode) {
         if (_dimosLidarCtx) {
           const prev = renderer.getRenderTarget();
           // Save/restore scene visibility for lidar-only render
-          const savedSplat = splatMesh ? splatMesh.visible : false;
-          const savedSpark = sparkRendererMesh ? sparkRendererMesh.visible : false;
           const savedAssets = assetsGroup.visible;
           const savedPrims = primitivesGroup.visible;
           const savedLights = lightsGroup.visible;
@@ -12993,8 +7382,6 @@ if (dimosMode) {
           const savedOverlay = rgbdPcOverlayGroup.visible;
           const savedBg = scene.background;
 
-          if (splatMesh) splatMesh.visible = false;
-          if (sparkRendererMesh) sparkRendererMesh.visible = false;
           assetsGroup.visible = false;
           primitivesGroup.visible = false;
           lightsGroup.visible = false;
@@ -13009,8 +7396,6 @@ if (dimosMode) {
           renderer.render(scene, _dimosCapCam);
 
           // Restore
-          if (splatMesh) splatMesh.visible = savedSplat;
-          if (sparkRendererMesh) sparkRendererMesh.visible = savedSpark;
           assetsGroup.visible = savedAssets;
           primitivesGroup.visible = savedPrims;
           lightsGroup.visible = savedLights;
