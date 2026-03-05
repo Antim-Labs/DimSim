@@ -123,6 +123,19 @@ async function main() {
     Deno.exit(0);
   }
 
+  if (subcommand === "--version" || subcommand === "version") {
+    // deno.json is importable as JSON both locally and from JSR cache
+    const metaUrl = new URL("./deno.json", import.meta.url);
+    try {
+      const resp = await fetch(metaUrl);
+      const meta = await resp.json();
+      console.log(meta.version);
+    } catch {
+      console.log("unknown");
+    }
+    Deno.exit(0);
+  }
+
   const port = parseInt(opts.port as string) || 8090;
 
   // ── Setup ───────────────────────────────────────────────────────────
