@@ -7206,50 +7206,12 @@ if (dimosMode) {
       const spawnPos = sceneJson.dimosSpawnPoint || { x: 2, y: 0.5, z: 3 };
       agent.setPosition(spawnPos.x, spawnPos.y, spawnPos.z);
       renderAgentTaskUi(); // update UI: hide spawn button, enable task controls
-      // Track yaw independently — reading from group.rotation.y (Three.js Euler)
-      // can return stale/zero values during internal matrix recomposition.
+      // Server-side physics: agent pose is driven by ServerPhysics (Deno).
+      // Browser just receives position updates and moves the visual avatar.
       let _dimosYaw = 0;
-      // Override the agent's update loop — in dimos mode, movement is driven
-      // by /cmd_vel (Twist velocity commands) from the dimos navigation stack.
-      // Uses the character controller for collision-aware movement (no clipping through furniture).
-      agent.update = function(dt) {
-        const bridge = window.__dimosBridge;
-        if (!bridge) { this._syncVisual(); return; }
-        const vel = bridge.getCmdVel();
-        if (vel.linX !== 0 || vel.linY !== 0 || vel.linZ !== 0 || vel.angY !== 0) {
-          const pos = this.body.translation();
-
-          // Integrate angular velocity (yaw rotation about Y axis)
-          _dimosYaw += vel.angY * dt;
-          this.group.rotation.y = _dimosYaw;
-
-          // Compute desired displacement in world frame
-          const cosY = Math.cos(_dimosYaw);
-          const sinY = Math.sin(_dimosYaw);
-          const desired = {
-            x: (vel.linZ * sinY + vel.linX * cosY) * dt,
-            y: vel.linY * dt - 9.81 * dt * dt * 0.5, // gravity keeps agent grounded
-            z: (vel.linZ * cosY - vel.linX * sinY) * dt,
-          };
-
-          // Use character controller for collision-aware movement
-          if (this.controller && this.collider) {
-            this.controller.computeColliderMovement(this.collider, desired, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS);
-            const m = this.controller.computedMovement();
-            this.body.setNextKinematicTranslation({ x: pos.x + m.x, y: pos.y + m.y, z: pos.z + m.z });
-          } else {
-            this.body.setNextKinematicTranslation({ x: pos.x + desired.x, y: pos.y + desired.y, z: pos.z + desired.z });
-          }
-        } else {
-          // Even with zero velocity, apply gravity to keep grounded
-          const pos = this.body.translation();
-          const desired = { x: 0, y: -9.81 * dt * dt * 0.5, z: 0 };
-          if (this.controller && this.collider) {
-            this.controller.computeColliderMovement(this.collider, desired, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS);
-            const m = this.controller.computedMovement();
-            this.body.setNextKinematicTranslation({ x: pos.x + m.x, y: pos.y + m.y, z: pos.z + m.z });
-          }
-        }
+      // Bridge updates _dimosYaw via this setter when server sends pose
+      window.__dimosSetYaw = (yaw) => { _dimosYaw = yaw; };
+      agent.update = function(_dt) {
         this._syncVisual();
       };
       console.log(`[dimos] Agent spawned: ${agent.id}`);
@@ -7475,18 +7437,23 @@ if (dimosMode) {
       window.__dimosBridge = bridge;
       window.__dimosAgent = agent;
 
-      // Send Rapier world snapshot to bridge server for server-side lidar.
-      // Wait for sensor WS to open, then send snapshot with DSSN magic prefix.
+      // Send Rapier world snapshot to bridge server for server-side physics + lidar.
+      // Format: [DSSN 4B][spawnX f32][spawnY f32][spawnZ f32][snapshot...]
       const _waitSensorWs = () => {
         if (bridge.wsSensors && bridge.wsSensors.readyState === WebSocket.OPEN) {
           try {
             const snapshot = rapierWorld.takeSnapshot();
-            const prefixed = new Uint8Array(4 + snapshot.byteLength);
-            prefixed[0] = 0x44; prefixed[1] = 0x53; prefixed[2] = 0x53; prefixed[3] = 0x4E; // "DSSN"
-            prefixed.set(snapshot, 4);
+            const [sx, sy, sz] = agent.getPosition?.() || [2, 0.5, 3];
+            const prefixed = new Uint8Array(16 + snapshot.byteLength);
+            const dv = new DataView(prefixed.buffer);
+            dv.setUint32(0, 0x44535332, false); // "DSS2" — includes spawn position
+            dv.setFloat32(4, sx, true);
+            dv.setFloat32(8, sy, true);
+            dv.setFloat32(12, sz, true);
+            prefixed.set(snapshot, 16);
             bridge.wsSensors.send(prefixed.buffer);
             bridge._serverLidar = true;
-            console.log(`[DimosBridge] sent Rapier snapshot (${(snapshot.byteLength / 1024).toFixed(0)}KB) — server lidar active`);
+            console.log(`[DimosBridge] sent Rapier snapshot (${(snapshot.byteLength / 1024).toFixed(0)}KB) spawn=(${sx.toFixed(1)},${sy.toFixed(1)},${sz.toFixed(1)}) — server physics + lidar active`);
           } catch (e) {
             console.warn("[DimosBridge] snapshot send failed:", e);
           }
@@ -7498,13 +7465,8 @@ if (dimosMode) {
       // Expose yaw for lidar pose sampling (avoids reading Three.js Euler)
       Object.defineProperty(window, '__dimosYaw', { get: () => _dimosYaw });
 
-      // Odom: publish on a standalone setInterval (not rAF) so it runs even when tab is backgrounded.
-      // rAF pauses when the tab loses focus, but odom must keep flowing for the planner.
-      setInterval(() => {
-        if (bridge._connected) {
-          bridge._publishOdom();
-        }
-      }, bridge.rates.odom);
+      // Odom: server-side physics publishes odom directly to LCM.
+      // Browser no longer needs to publish odom — server is authoritative.
 
       // Eval harness disabled — focusing on dimos integration.
       // Re-enable by importing evalHarness.ts when eval workflows are needed.

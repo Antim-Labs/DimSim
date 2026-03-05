@@ -15,6 +15,7 @@ import { decodePacket } from "../vendor/lcm/transport.ts";
 import { MAGIC_SHORT, SHORT_HEADER_SIZE } from "../vendor/lcm/types.ts";
 import { serveDir } from "@std/http/file-server";
 import { ServerLidar } from "./lidar.ts";
+import { ServerPhysics } from "./physics.ts";
 import { geometry_msgs } from "@dimos/msgs";
 
 // Magic prefix for Rapier world snapshot (ASCII "DSSN")
@@ -40,17 +41,20 @@ export async function startBridgeServer(options: BridgeServerOptions) {
   let lcm: LCM | null = null;
   const sentSeqs = new Set<number>();
   let serverLidar: ServerLidar | null = null;
+  let serverPhysics: ServerPhysics | null = null;
 
-  // -- Server-side lidar init from Rapier snapshot ----------------------------
-  async function initServerLidar(snapshot: Uint8Array): Promise<void> {
+  // -- Server-side init from Rapier snapshot ----------------------------------
+  async function initServerSystems(snapshot: Uint8Array, spawnPos?: { x: number; y: number; z: number }): Promise<void> {
     if (serverLidar) { serverLidar.stop(); serverLidar = null; }
+    if (serverPhysics) { serverPhysics.stop(); serverPhysics = null; }
     try {
       const RAPIER = await import("@dimforge/rapier3d-compat");
       await RAPIER.init();
       const world = RAPIER.World.restoreSnapshot(snapshot);
       if (!world) { console.error("[bridge] failed to restore Rapier snapshot"); return; }
 
-      // Remove non-fixed bodies (player capsule, AI agents) — server world is static
+      // Remove non-fixed bodies (player capsule, AI agents) — server world is static.
+      // ServerPhysics will create its own agent body.
       const bodiesToRemove: any[] = [];
       world.bodies.forEach((body: any) => {
         if (!body.isFixed()) bodiesToRemove.push(body.handle);
@@ -60,10 +64,34 @@ export async function startBridgeServer(options: BridgeServerOptions) {
       }
       console.log(`[bridge] Rapier snapshot restored (removed ${bodiesToRemove.length} non-fixed bodies)`);
 
+      // Server-side physics (cmd_vel → collision-aware movement → odom)
+      serverPhysics = new ServerPhysics(lcm!, world, RAPIER, sentSeqs);
+      if (spawnPos) {
+        serverPhysics.setPosition(spawnPos.x, spawnPos.y, spawnPos.z);
+      }
+
+      // Server-side lidar (uses physics pose for ray origin)
       serverLidar = new ServerLidar(lcm!, world, RAPIER, sentSeqs);
+      serverLidar.setExcludeBody(serverPhysics.getBody());
+
+      // Wire physics pose → lidar pose (no more browser odom dependency)
+      serverPhysics.setOnPoseUpdate((x, y, z, yaw) => {
+        const qw = Math.cos(yaw / 2);
+        const qy = Math.sin(yaw / 2);
+        serverLidar!.updatePose(x, y, z, 0, qy, 0, qw);
+
+        // Send position to browser for visual sync
+        const msg = JSON.stringify({ type: "pose", x, y, z, yaw });
+        const client = activeControlClient;
+        if (client && client.readyState === WebSocket.OPEN) {
+          try { client.send(msg); } catch { /* ignore */ }
+        }
+      });
+
+      serverPhysics.start();
       serverLidar.start();
     } catch (e) {
-      console.error("[bridge] server lidar init error:", e);
+      console.error("[bridge] server systems init error:", e);
     }
   }
 
@@ -117,13 +145,28 @@ export async function startBridgeServer(options: BridgeServerOptions) {
           if (!(event.data instanceof ArrayBuffer) || !lcm) return;
           const packet = new Uint8Array(event.data);
 
-          // Check for Rapier snapshot (DSSN magic prefix)
+          // Check for Rapier snapshot
+          // Format DSS2: [DSS2 4B][spawnX f32][spawnY f32][spawnZ f32][snapshot...]
+          // Legacy DSSN: [DSSN 4B][snapshot...] (no spawn pos)
           if (packet.length > 4) {
-            const magic = new DataView(packet.buffer, packet.byteOffset, 4).getUint32(0, false);
-            if (magic === SNAPSHOT_MAGIC) {
+            const dv = new DataView(packet.buffer, packet.byteOffset);
+            const magic = dv.getUint32(0, false);
+
+            if (magic === 0x44535332) { // "DSS2" — new format with spawn position
+              const sx = dv.getFloat32(4, true);
+              const sy = dv.getFloat32(8, true);
+              const sz = dv.getFloat32(12, true);
+              const snapshot = packet.slice(16);
+              const spawnPos = { x: sx, y: sy, z: sz };
+              console.log(`[bridge] Rapier snapshot received (${(snapshot.byteLength / 1024).toFixed(0)}KB) spawn=(${sx.toFixed(1)},${sy.toFixed(1)},${sz.toFixed(1)})`);
+              initServerSystems(snapshot, spawnPos);
+              return;
+            }
+
+            if (magic === SNAPSHOT_MAGIC) { // "DSSN" — legacy format
               const snapshot = packet.slice(4);
-              console.log(`[bridge] Rapier snapshot received (${(snapshot.byteLength / 1024).toFixed(0)}KB)`);
-              initServerLidar(snapshot);
+              console.log(`[bridge] Rapier snapshot received (${(snapshot.byteLength / 1024).toFixed(0)}KB) [legacy, no spawn]`);
+              initServerSystems(snapshot);
               return;
             }
           }
@@ -175,24 +218,11 @@ export async function startBridgeServer(options: BridgeServerOptions) {
             if (decoded && decoded.type === "small") {
               _odomLogN++;
 
-              // Feed odom to server-side lidar BEFORE async LCM publish
-              if (serverLidar && decoded.channel === "/odom#geometry_msgs.PoseStamped") {
-                try {
-                  const odom = geometry_msgs.PoseStamped.decode(decoded.data);
-                  const p = odom.pose.position;
-                  const q = odom.pose.orientation;
-                  // ROS Z-up → Three.js Y-up: inverse cyclic permutation
-                  // ROS (x,y,z) → Three.js (y,z,x)
-                  serverLidar.updatePose(
-                    p.y, p.z, p.x,  // position
-                    q.y, q.z, q.x, q.w,  // quaternion
-                  );
-                  if (_odomLogN <= 3 || _odomLogN % 200 === 0) {
-                    console.log(`[bridge] odom→lidar #${_odomLogN}: pos=(${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})`);
-                  }
-                } catch (e) {
-                  if (_odomLogN <= 5) console.warn("[bridge] odom decode error:", e);
-                }
+              // With server-side physics, odom is published by ServerPhysics.
+              // Browser odom uplink is no longer needed — skip LCM relay for odom.
+              if (serverPhysics && decoded.channel === "/odom#geometry_msgs.PoseStamped") {
+                // Ignore browser odom — server physics is authoritative
+                return;
               }
 
               // Relay to LCM (async, non-fatal)

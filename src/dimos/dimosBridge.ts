@@ -143,6 +143,17 @@ export class DimosBridge {
     };
 
     this.wsControl.onmessage = (event: MessageEvent) => {
+      // Text messages: server-side physics pose updates
+      if (typeof event.data === "string") {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === "pose") {
+            this._handleServerPose(msg.x, msg.y, msg.z, msg.yaw);
+          }
+        } catch {}
+        return;
+      }
+      // Binary messages: LCM packets (cmd_vel relay)
       if (!(event.data instanceof ArrayBuffer)) return;
       try {
         const raw = new Uint8Array(event.data);
@@ -214,6 +225,26 @@ export class DimosBridge {
     }
     return this._cmdVel;
   }
+
+  /** Handle server-side physics pose update (Three.js Y-up frame). */
+  _handleServerPose(x: number, y: number, z: number, yaw: number): void {
+    if (!this.agent) return;
+    // Move the agent body to the server-authoritative position
+    if (this.agent.body) {
+      this.agent.body.setNextKinematicTranslation({ x, y, z });
+    }
+    if (this.agent.group) {
+      this.agent.group.rotation.y = yaw;
+    }
+    // Update engine's _dimosYaw for sensor capture / odom pose reading
+    if ((window as any).__dimosSetYaw) {
+      (window as any).__dimosSetYaw(yaw);
+    }
+    // Store for odom/sensor capture
+    this._serverPose = { x, y, z, yaw };
+  }
+
+  _serverPose: { x: number; y: number; z: number; yaw: number } | null = null;
 
   // -- Outgoing sensor data ---------------------------------------------------
 

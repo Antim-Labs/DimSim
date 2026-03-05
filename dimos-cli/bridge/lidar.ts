@@ -91,6 +91,7 @@ export class ServerLidar {
   private scanCount = 0;
   private logN = 0;
   private publishing = false; // busy guard — skip scan if previous publish still in flight
+  private excludeBody: any = null; // rigid body to exclude from raycasting (agent's own colliders)
 
   // Current robot pose (Three.js Y-up world frame)
   private px = 0;
@@ -114,6 +115,11 @@ export class ServerLidar {
     // queryPipeline.update() crashes on restored worlds (WASM type mismatch),
     // but world.step() internally updates the pipeline correctly.
     this.world.step();
+  }
+
+  /** Set rigid body to exclude from raycasting (agent's own capsule). */
+  setExcludeBody(body: any): void {
+    this.excludeBody = body;
   }
 
   /** Update robot pose. Position is capsule center (odom); we apply lidar mount offset internally. */
@@ -186,7 +192,12 @@ export class ServerLidar {
         this.ray.dir.x = nx; this.ray.dir.y = ny; this.ray.dir.z = nz;
         // Use world.castRay (not queryPipeline.castRayAndGetNormal) —
         // the pipeline API crashes on restored snapshot worlds.
-        const hit = world.castRay(this.ray, MAX_RANGE, false);
+        // Exclude agent's own rigid body so lidar doesn't hit its own colliders.
+        const hit = world.castRay(
+          this.ray, MAX_RANGE, false,
+          undefined, undefined, undefined,
+          this.excludeBody,
+        );
 
         if (!hit) continue;
         const toi = hit.timeOfImpact ?? 0;
