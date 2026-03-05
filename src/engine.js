@@ -6817,7 +6817,7 @@ function updateRapier(dt) {
 function tick() {
   const rawDt = clock.getDelta();
   const physicsDt = Math.min(rawDt, 0.05);
-  const motionDt = Math.min(rawDt, 0.2);
+  const motionDt = Math.min(rawDt, 0.02);
 
   updateRapier(physicsDt);
 

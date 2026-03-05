@@ -28,7 +28,7 @@ const CH_LIDAR = "/lidar#sensor_msgs.PointCloud2";
 
 // -- Default publish rates (ms) ----------------------------------------------
 const DEFAULT_RATES: PublishRates = { odom: 20, lidar: 200, images: 500 }; // 50 Hz odom, 5 Hz lidar, 2 Hz images
-const CMD_VEL_TIMEOUT_MS = 2500;
+const CMD_VEL_TIMEOUT_MS = 500;
 const SENSOR_BACKPRESSURE_BYTES = 8 * 1024 * 1024;
 const BRIDGE_DEBUG = false;
 const LIDAR_POINT_STEP = 16;
