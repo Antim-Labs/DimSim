@@ -269,8 +269,8 @@ export class ServerPhysics {
     try {
       this.sentSeqs.add(this.lcm.getNextSeq());
       this.lcm.publishRaw(CH_ODOM, odom.encode()).catch(() => {});
-    } catch (e) {
-      if (this.seq <= 3) console.warn("[physics] odom publish error:", e?.message || e);
+    } catch (e: unknown) {
+      if (this.seq <= 3) console.warn("[physics] odom publish error:", e);
     }
   }
 }
