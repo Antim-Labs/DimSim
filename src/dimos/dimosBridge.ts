@@ -28,7 +28,7 @@ const CH_LIDAR = "/lidar#sensor_msgs.PointCloud2";
 
 // -- Default publish rates (ms) ----------------------------------------------
 const DEFAULT_RATES: PublishRates = { odom: 20, lidar: 200, images: 500 }; // 50 Hz odom, 5 Hz lidar, 2 Hz images
-const CMD_VEL_TIMEOUT_MS = 500;
+const CMD_VEL_TIMEOUT_MS = 2500;
 const SENSOR_BACKPRESSURE_BYTES = 8 * 1024 * 1024;
 const BRIDGE_DEBUG = false;
 const LIDAR_POINT_STEP = 16;
@@ -207,7 +207,7 @@ export class DimosBridge {
     this._cmdVelStamp = Date.now();
   }
 
-  /** Get current velocity, auto-zeroing after 1500ms timeout (safety stop). */
+  /** Get current velocity, auto-zeroing after CMD_VEL_TIMEOUT_MS (safety stop). */
   getCmdVel(): { linX: number; linY: number; linZ: number; angX: number; angY: number; angZ: number } {
     if (!this._cmdVel || Date.now() - this._cmdVelStamp > CMD_VEL_TIMEOUT_MS) {
       return { linX: 0, linY: 0, linZ: 0, angX: 0, angY: 0, angZ: 0 };
@@ -351,21 +351,34 @@ export class DimosBridge {
 
   // -- Depth ------------------------------------------------------------------
 
+  _depthU16: Uint16Array | null = null;
+
   _publishDepthSync(header: any): void {
     try {
       if (!this._isSensorSocketOpen()) return;
       const frame = this.sensors.captureDepth();
       if (!frame) return;
 
-      const depthBytes = new Uint8Array(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength);
+      // Quantize float32 meters → uint16 millimeters (0–65.535m range, 1mm precision)
+      const n = frame.data.length;
+      if (!this._depthU16 || this._depthU16.length !== n) {
+        this._depthU16 = new Uint16Array(n);
+      }
+      const f32 = frame.data;
+      const u16 = this._depthU16;
+      for (let i = 0; i < n; i++) {
+        const mm = f32[i] * 1000;
+        u16[i] = mm > 65535 ? 65535 : mm < 0 ? 0 : mm;
+      }
+      const depthBytes = new Uint8Array(u16.buffer, u16.byteOffset, u16.byteLength);
 
       this._sendSensor(CH_DEPTH, new sensor_msgs.Image({
         header,
         height: frame.height,
         width: frame.width,
-        encoding: "32FC1",
+        encoding: "16UC1",
         is_bigendian: 0,
-        step: frame.width * 4,
+        step: frame.width * 2,
         data_length: depthBytes.length,
         data: depthBytes,
       }));

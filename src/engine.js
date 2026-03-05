@@ -6815,13 +6815,15 @@ function updateRapier(dt) {
 }
 
 function tick() {
-  const dt = Math.min(clock.getDelta(), 0.05);
+  const rawDt = clock.getDelta();
+  const physicsDt = Math.min(rawDt, 0.05);
+  const motionDt = Math.min(rawDt, 0.2);
 
-  updateRapier(dt);
+  updateRapier(physicsDt);
 
   // Bumpable assets: only compute if any exist
   if (_hasBumpableAssets()) {
-    const agentPushers = aiAgents.length ? collectAgentBumpPushers(dt) : [];
+    const agentPushers = aiAgents.length ? collectAgentBumpPushers(physicsDt) : [];
     let bumpPlayerPos = null;
     if (playerBody) {
       const p = playerBody.translation();
@@ -6830,7 +6832,7 @@ function tick() {
       bumpPlayerPos = controls.object.position.clone();
       bumpPlayerPos.y -= PLAYER_EYE_HEIGHT;
     }
-    updateBumpableAssets(dt, bumpPlayerPos, agentPushers);
+    updateBumpableAssets(physicsDt, bumpPlayerPos, agentPushers);
   }
 
   // Update AI agents (if Rapier is initialized).
@@ -6838,7 +6840,8 @@ function tick() {
     const now = Date.now();
     for (const a of aiAgents) {
       try {
-        a.update(dt, now);
+        // Keep cmd_vel integration tied to wall-clock delta even when physics dt is clamped.
+        a.update(motionDt, now);
       } catch (e) {
         console.warn("AI update failed:", e);
       }
@@ -6847,7 +6850,7 @@ function tick() {
   
   // Update agent camera follow (after agent update, before render)
   if (agentCameraFollow) {
-    updateAgentCameraFollow(dt);
+    updateAgentCameraFollow(physicsDt);
     avatar.visible = false;
   }
 

@@ -13,12 +13,12 @@ import {
 import type { LCM } from "../vendor/lcm/lcm.ts";
 
 // -- Lidar constants (must match engine.js) -----------------------------------
-const NUM_POINTS = 10000;
+const NUM_POINTS = 15000;
 const MIN_RANGE = 0.1;
-const MAX_RANGE = 3;
+const MAX_RANGE = 4;
 const V_MIN_RAD = (-30 * Math.PI) / 180;
 const V_MAX_RAD = (15 * Math.PI) / 180;
-const RATE_MS = 200; // 5 Hz
+const RATE_MS = 100; // 10 Hz
 
 const CH_LIDAR = "/lidar#sensor_msgs.PointCloud2";
 
