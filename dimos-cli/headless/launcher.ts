@@ -74,6 +74,10 @@ const CPU_ARGS = [
   "--disable-renderer-backgrounding",
 ];
 
+// Use system Chrome on macOS (bundled Chromium has broken WebGL).
+// On Linux, bundled Chromium works fine — run `npx playwright install chromium` first.
+const LAUNCH_CHANNEL = Deno.build.os === "darwin" ? "chrome" : undefined;
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 /** Filter noisy browser console output — only forward errors, warnings, and eval/bridge logs. */
@@ -112,7 +116,7 @@ export async function launchHeadless(options: LaunchOptions): Promise<HeadlessIn
 
   const browser = await chromium.launch({
     headless: false,  // --headless=new passed via args (Playwright's built-in headless uses old mode)
-    channel: "chrome", // Use system Chrome — Playwright bundled Chromium has broken WebGL on macOS
+    channel: LAUNCH_CHANNEL,
     args,
   });
 
@@ -147,7 +151,7 @@ export async function launchMultiPage(options: MultiPageOptions): Promise<MultiP
 
   console.log(`[headless] Multi-page: ${numPages} pages, render=${render}`);
 
-  const browser = await chromium.launch({ headless: false, channel: "chrome", args });
+  const browser = await chromium.launch({ headless: false, channel: LAUNCH_CHANNEL, args });
 
   const pages: Page[] = [];
   const channels: string[] = [];
