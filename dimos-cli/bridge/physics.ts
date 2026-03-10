@@ -25,6 +25,7 @@ const CONTROLLER_OFFSET = 0.05;
 const PHYSICS_HZ = 50;
 const PHYSICS_DT = 1.0 / PHYSICS_HZ;
 const GRAVITY_Y = -9.81;
+const SPEED_SCALE = 3.0; // Multiplier for cmd_vel (linear + angular)
 
 const CH_ODOM = "/odom#geometry_msgs.PoseStamped";
 const CH_CMD_VEL = "/cmd_vel#geometry_msgs.Twist";
@@ -179,9 +180,9 @@ export class ServerPhysics {
   private _step(): void {
     // Safety timeout — zero velocity if no cmd_vel received recently
     const hasVel = Date.now() - this.cmdVelStamp < CMD_VEL_TIMEOUT_MS;
-    const linX = hasVel ? this.linX : 0;
-    const linZ = hasVel ? this.linZ : 0;
-    const angZ = hasVel ? this.angZ : 0;
+    const linX = hasVel ? this.linX * SPEED_SCALE : 0;
+    const linZ = hasVel ? this.linZ * SPEED_SCALE : 0;
+    const angZ = hasVel ? this.angZ * SPEED_SCALE : 0;
 
     // Integrate yaw (ROS angZ → Three.js Y rotation)
     // ROS +z yaw = CCW from above = Three.js +Y rotation
