@@ -622,6 +622,7 @@ skyDome.renderOrder = -1000;
 skyDome.visible = false;
 scene.add(skyDome);
 
+
 // Registry of built-in scene lights so the editor can expose them
 const sceneLights = [
   { id: "_ambient",  label: "Ambient",     obj: ambientLight, type: "ambient" },
@@ -7257,6 +7258,7 @@ if (dimosMode) {
       // 2. Auto-spawn agent (wait for physics to settle)
       await new Promise((r) => setTimeout(r, 1500));
       await ensureRapierLoaded();
+      // Re-apply grid floor now that rapier is loaded (creates collider)
       spawnPlayerInsideScene();
       const agent = createAiAgent({ ephemeral: false });
       aiAgents.push(agent);

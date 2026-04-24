@@ -3,7 +3,6 @@
   "worldKey": "default",
   "exportedAt": 0,
   "tags": ["empty", "template"],
-  "dimosSpawnPoint": { "x": 0, "y": 1, "z": 0 },
   "embodiment": {
     "avatarUrl": ["/agent-model/unitree_go2.glb", "/agent-model/robot.glb"],
     "radius": 0.12,
