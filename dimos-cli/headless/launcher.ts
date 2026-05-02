@@ -74,9 +74,10 @@ const CPU_ARGS = [
   "--disable-renderer-backgrounding",
 ];
 
-// Use system Chrome on macOS (bundled Chromium has broken WebGL).
-// On Linux, bundled Chromium works fine — run `npx playwright install chromium` first.
-const LAUNCH_CHANNEL = Deno.build.os === "darwin" ? "chrome" : undefined;
+// Default: bundled Chromium (works on Linux + macOS in CPU mode with SwiftShader).
+// Set DIMSIM_CHROME_CHANNEL=chrome to use system Google Chrome (needed for hardware
+// WebGL on macOS — bundled Chromium ships without the full Metal/ANGLE GPU stack).
+const LAUNCH_CHANNEL = Deno.env.get("DIMSIM_CHROME_CHANNEL") || undefined;
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
