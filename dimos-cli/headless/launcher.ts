@@ -125,9 +125,16 @@ export async function launchHeadless(options: LaunchOptions): Promise<HeadlessIn
   const page = await context.newPage();
   hookPageConsole(page, "[browser]");
 
+  // Set default timeout so waitForFunction picks it up (its third arg is
+  // options, not the second — passing {timeout} as second silently uses
+  // Playwright's 30s default).
+  context.setDefaultTimeout(timeout);
+  page.setDefaultTimeout(timeout);
+
   await page.goto(url, { waitUntil: "load", timeout });
   await page.waitForFunction(
     () => typeof (window as unknown as Record<string, unknown>).__dimosBridge !== "undefined",
+    undefined,
     { timeout },
   );
 
@@ -172,6 +179,7 @@ export async function launchMultiPage(options: MultiPageOptions): Promise<MultiP
     await page.goto(pageUrl, { waitUntil: "load", timeout });
     await page.waitForFunction(
       () => typeof (window as unknown as Record<string, unknown>).__dimosBridge !== "undefined",
+      undefined,
       { timeout },
     );
     console.log(`[headless] Page ${i}: ready`);
