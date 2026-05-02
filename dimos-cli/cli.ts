@@ -366,7 +366,12 @@ async function main() {
       } else {
         console.log("[dimsim] Launching headless browser...");
         const url = `http://localhost:${port}`;
-        await launchHeadless({ url, timeout: 30000, render });
+        // CPU rendering with SwiftShader is slow — scene + agent init takes
+        // ~27s on CI Macs. Allow 90s by default; override via env var.
+        const headlessTimeout = parseInt(
+          Deno.env.get("DIMSIM_HEADLESS_TIMEOUT") || "90000",
+        );
+        await launchHeadless({ url, timeout: headlessTimeout, render });
         await new Promise((r) => setTimeout(r, 3000));
         console.log("[dimsim] Headless browser ready. LCM bridge active.");
       }
