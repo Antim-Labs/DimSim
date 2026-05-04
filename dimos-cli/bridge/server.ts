@@ -190,15 +190,58 @@ export async function startBridgeServer(options: BridgeServerOptions) {
         socket.onclose = () => { chState.sensorClients.delete(socket); };
         socket.onerror = () => chState.sensorClients.delete(socket);
 
+        // Chunked snapshot reassembly state (DSC1 protocol).
+        // Browser ships the Rapier snapshot in many small frames so a
+        // CPU-starved main thread can drain the WebSocket pump.
+        let chunkedSnapshot: {
+          total: number;
+          spawn: { x: number; y: number; z: number };
+          received: number;
+          parts: Uint8Array[];
+        } | null = null;
+
         let _sensorLogN = 0;
         socket.onmessage = (event: MessageEvent) => {
           if (!(event.data instanceof ArrayBuffer) || !chState.lcm) return;
           const packet = new Uint8Array(event.data);
 
+          // While reassembling a chunked snapshot, treat every binary frame
+          // on this socket as the next chunk in order.
+          if (chunkedSnapshot) {
+            chunkedSnapshot.parts.push(packet);
+            chunkedSnapshot.received += packet.byteLength;
+            if (chunkedSnapshot.received >= chunkedSnapshot.total) {
+              const combined = new Uint8Array(chunkedSnapshot.received);
+              let off = 0;
+              for (const p of chunkedSnapshot.parts) { combined.set(p, off); off += p.byteLength; }
+              const snapshot = combined.subarray(0, chunkedSnapshot.total);
+              const spawn = chunkedSnapshot.spawn;
+              console.log(`${logPrefix} Rapier snapshot received (${(snapshot.byteLength / 1024).toFixed(0)}KB chunked) spawn=(${spawn.x.toFixed(1)},${spawn.y.toFixed(1)},${spawn.z.toFixed(1)})`);
+              chunkedSnapshot = null;
+              initServerSystems(chState, snapshot, spawn);
+            }
+            return;
+          }
+
           // Check for Rapier snapshot
           if (packet.length > 4) {
             const dv = new DataView(packet.buffer, packet.byteOffset);
             const magic = dv.getUint32(0, false);
+
+            if (magic === 0x44534331) { // "DSC1" — chunked prelude
+              const total = dv.getUint32(4, true);
+              const sx = dv.getFloat32(8, true);
+              const sy = dv.getFloat32(12, true);
+              const sz = dv.getFloat32(16, true);
+              chunkedSnapshot = {
+                total,
+                spawn: { x: sx, y: sy, z: sz },
+                received: 0,
+                parts: [],
+              };
+              console.log(`${logPrefix} Rapier snapshot incoming (${(total / 1024).toFixed(0)}KB chunked) spawn=(${sx.toFixed(1)},${sy.toFixed(1)},${sz.toFixed(1)})`);
+              return;
+            }
 
             if (magic === 0x44535332) { // "DSS2"
               const sx = dv.getFloat32(4, true);

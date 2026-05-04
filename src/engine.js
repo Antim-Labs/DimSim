@@ -7620,22 +7620,58 @@ if (dimosMode) {
       rapierWorld.colliders.forEach(() => { _snapshotColliders++; });
       console.log(`[dimos] Flushed collider queue — ${_snapshotColliders} colliders in world before snapshot`);
 
-      // Format: [DSSN 4B][spawnX f32][spawnY f32][spawnZ f32][snapshot...]
+      // Chunked snapshot protocol (DSC1) — single-frame send stalls when the
+      // browser main thread is CPU-saturated (e.g. headless SwiftShader on a
+      // weak runner): WebSocket.bufferedAmount climbs and never drains.
+      // Splitting into ~256KB chunks with a setTimeout(0) yield between each
+      // lets the WS pump run, and bridge reassembles in receive order.
+      // Wire format:
+      //   prelude:  [DSC1 4B BE][total u32 LE][sx f32 LE][sy f32 LE][sz f32 LE]   (20B)
+      //   chunks:   raw bytes, in order, until `total` accumulated bridge-side.
+      const SNAPSHOT_CHUNK_SIZE = 256 * 1024;
       const _waitSensorWs = () => {
         if (bridge.wsSensors && bridge.wsSensors.readyState === WebSocket.OPEN) {
           try {
             const snapshot = rapierWorld.takeSnapshot();
             const [sx, sy, sz] = agent.getPosition?.() || [2, 0.5, 3];
-            const prefixed = new Uint8Array(16 + snapshot.byteLength);
-            const dv = new DataView(prefixed.buffer);
-            dv.setUint32(0, 0x44535332, false); // "DSS2" — includes spawn position
-            dv.setFloat32(4, sx, true);
-            dv.setFloat32(8, sy, true);
-            dv.setFloat32(12, sz, true);
-            prefixed.set(snapshot, 16);
-            bridge.wsSensors.send(prefixed.buffer);
+            const total = snapshot.byteLength;
+
+            const prelude = new Uint8Array(20);
+            const pdv = new DataView(prelude.buffer);
+            pdv.setUint32(0, 0x44534331, false); // "DSC1"
+            pdv.setUint32(4, total, true);
+            pdv.setFloat32(8, sx, true);
+            pdv.setFloat32(12, sy, true);
+            pdv.setFloat32(16, sz, true);
+            bridge.wsSensors.send(prelude.buffer);
             bridge._serverLidar = true;
-            console.log(`[DimosBridge] sent Rapier snapshot (${(snapshot.byteLength / 1024).toFixed(0)}KB) spawn=(${sx.toFixed(1)},${sy.toFixed(1)},${sz.toFixed(1)}) — server physics + lidar active`);
+
+            let sent = 0;
+            let chunkN = 0;
+            const sendNextChunk = () => {
+              if (bridge.wsSensors.readyState !== WebSocket.OPEN) {
+                console.warn("[DimosBridge] sensor WS closed mid-snapshot");
+                return;
+              }
+              // Backpressure: don't outpace the WS pump.
+              if (bridge.wsSensors.bufferedAmount > 4 * SNAPSHOT_CHUNK_SIZE) {
+                setTimeout(sendNextChunk, 50);
+                return;
+              }
+              const end = Math.min(sent + SNAPSHOT_CHUNK_SIZE, total);
+              bridge.wsSensors.send(snapshot.subarray(sent, end));
+              sent = end;
+              chunkN++;
+              if (sent >= total) {
+                console.log(`[DimosBridge] sent Rapier snapshot (${(total / 1024).toFixed(0)}KB in ${chunkN} chunks) spawn=(${sx.toFixed(1)},${sy.toFixed(1)},${sz.toFixed(1)}) — server physics + lidar active`);
+                return;
+              }
+              if (chunkN % 16 === 0) {
+                console.log(`[DimosBridge] snapshot progress: ${(sent / 1024).toFixed(0)}/${(total / 1024).toFixed(0)}KB (chunk ${chunkN})`);
+              }
+              setTimeout(sendNextChunk, 0); // yield to event loop
+            };
+            sendNextChunk();
           } catch (e) {
             console.warn("[DimosBridge] snapshot send failed:", e);
           }
