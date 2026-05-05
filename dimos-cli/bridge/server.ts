@@ -59,6 +59,54 @@ export async function startBridgeServer(options: BridgeServerOptions) {
     sensorRates, sensorEnable, cameraFov,
   } = options;
 
+  // Event-loop lag probe — fire setTimeout(0) every 50ms; difference between
+  // expected and actual fire time is contention-induced lag. If physics misses
+  // ticks, this will show why.
+  if (Deno.env.get("DIMSIM_PROFILE_PHYSICS") === "1") {
+    let lagSum = 0, lagMax = 0, lagCount = 0;
+    const tick = () => {
+      const expected = performance.now() + 50;
+      setTimeout(() => {
+        const lag = performance.now() - expected;
+        lagSum += Math.max(lag, 0);
+        if (lag > lagMax) lagMax = lag;
+        lagCount++;
+        if (lagCount >= 20) { // ~1s
+          console.log(`[loop-prof] lag avg=${(lagSum / lagCount).toFixed(1)}ms max=${lagMax.toFixed(1)}ms (over ${lagCount} probes)`);
+          lagSum = 0; lagMax = 0; lagCount = 0;
+        }
+        tick();
+      }, 50);
+    };
+    tick();
+  }
+
+  // ── Per-handler profiling --------------------------------------------------
+  // Records sum/max/count for two hot callbacks so we can see whether they
+  // dominate the bridge thread alongside lidar.
+  const PROFILE = Deno.env.get("DIMSIM_PROFILE_PHYSICS") === "1";
+  const profPose = { n: 0, sum: 0, max: 0 };
+  const profRelay = { n: 0, sum: 0, max: 0, bytes: 0 };
+  if (PROFILE) {
+    setInterval(() => {
+      if (profPose.n > 0) {
+        console.log(
+          `[pose-cb-prof] n=${profPose.n} avg=${(profPose.sum / profPose.n).toFixed(2)}ms ` +
+          `max=${profPose.max.toFixed(2)}ms total=${profPose.sum.toFixed(0)}ms/sec`,
+        );
+        profPose.n = 0; profPose.sum = 0; profPose.max = 0;
+      }
+      if (profRelay.n > 0) {
+        console.log(
+          `[relay-prof] n=${profRelay.n} avg=${(profRelay.sum / profRelay.n).toFixed(2)}ms ` +
+          `max=${profRelay.max.toFixed(2)}ms total=${profRelay.sum.toFixed(0)}ms/sec ` +
+          `bytes=${profRelay.bytes}`,
+        );
+        profRelay.n = 0; profRelay.sum = 0; profRelay.max = 0; profRelay.bytes = 0;
+      }
+    }, 1000);
+  }
+
   // Build channel list: if channels provided, use them; otherwise single default
   const channelNames = channels && channels.length > 0
     ? channels
@@ -153,6 +201,7 @@ export async function startBridgeServer(options: BridgeServerOptions) {
       chState.serverLidar.setExcludeBody(chState.serverPhysics.getBody());
 
       chState.serverPhysics.setOnPoseUpdate((x, y, z, yaw) => {
+        const t0 = PROFILE ? performance.now() : 0;
         const qw = Math.cos(yaw / 2);
         const qy = Math.sin(yaw / 2);
         chState.serverLidar!.updatePose(x, y, z, 0, qy, 0, qw);
@@ -161,6 +210,12 @@ export async function startBridgeServer(options: BridgeServerOptions) {
         const client = chState.activeControlClient;
         if (client && client.readyState === WebSocket.OPEN) {
           try { client.send(msg); } catch { /* ignore */ }
+        }
+        if (PROFILE) {
+          const dt = performance.now() - t0;
+          profPose.n++;
+          profPose.sum += dt;
+          if (dt > profPose.max) profPose.max = dt;
         }
       });
 
@@ -262,6 +317,7 @@ export async function startBridgeServer(options: BridgeServerOptions) {
             }
           }
 
+          const t0 = PROFILE ? performance.now() : 0;
           try {
             const decoded = decodePacket(packet);
             if (decoded && decoded.type === "small") {
@@ -274,6 +330,13 @@ export async function startBridgeServer(options: BridgeServerOptions) {
               chState.lcm.publishRaw(decoded.channel, decoded.data).catch(() => {});
             }
           } catch { /* ignore */ }
+          if (PROFILE) {
+            const dt = performance.now() - t0;
+            profRelay.n++;
+            profRelay.sum += dt;
+            profRelay.bytes += packet.byteLength;
+            if (dt > profRelay.max) profRelay.max = dt;
+          }
         };
       } else {
         // ── CONTROL WebSocket ─────────────────────────────────────────
