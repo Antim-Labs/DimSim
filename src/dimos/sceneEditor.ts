@@ -68,11 +68,69 @@ export class SceneEditor {
             this._handleCommand(cmd);
             return;
           }
+          // Sticky-save broadcast: SceneClient.reload() pushes a saved scene
+          // and asks all viewers to hot-reload. setActiveScene without
+          // broadcast is silent persistence (handled bridge-side only).
+          if (cmd.type === "setActiveScene" && cmd.broadcast && cmd.content) {
+            this._reloadScene(cmd.content).catch((e) =>
+              console.error("[sceneEditor] setActiveScene reload failed:", e),
+            );
+            return;
+          }
         } catch { /* not JSON or not for us */ }
       }
       // Pass through to existing handlers (EvalHarness, DimosBridge)
       if (origOnMessage) (origOnMessage as (e: MessageEvent) => void).call(ws, event);
     };
+  }
+
+  async _reloadScene(content: Record<string, unknown>): Promise<void> {
+    const fn = (globalThis as any).importLevelFromJSON;
+    if (typeof fn !== "function") {
+      console.warn("[sceneEditor] importLevelFromJSON not on window; cannot hot-reload");
+      return;
+    }
+    // Runtime add_object / load_map / add_npc calls put meshes directly in
+    // scene.children. importLevelFromJSON only manages primitivesGroup, so
+    // without this cleanup those runtime meshes linger as ghosts after a
+    // hot-reload (especially visible when the JSON edit moves a primitive).
+    this._clearRuntimeAdditions();
+    await fn(content);
+    console.log("[sceneEditor] scene hot-reloaded from setActiveScene");
+  }
+
+  _clearRuntimeAdditions(): void {
+    const g = this.globals;
+    const scene = g.scene;
+    const agentGroup = g.agent?.group;
+    const camera = g.camera;
+    const toRemove: any[] = [];
+    for (const c of scene.children) {
+      if (c === camera || c.isLight || c.isGroup) continue;
+      if (c === agentGroup) continue;
+      if (c.userData?.engineInternal) continue;
+      toRemove.push(c);
+    }
+    for (const obj of toRemove) {
+      const collider = this._colliderMap.get(obj.uuid);
+      if (collider) {
+        try { g.rapierWorld.removeCollider(collider, false); } catch { /* ignore */ }
+        this._colliderMap.delete(obj.uuid);
+      }
+      const dyn = this._dynamicBodies.get(obj.uuid);
+      if (dyn) {
+        try { g.rapierWorld.removeRigidBody(dyn.body); } catch { /* ignore */ }
+        this._dynamicBodies.delete(obj.uuid);
+      }
+      obj.traverse((c: any) => {
+        if (c.isMesh) {
+          c.geometry?.dispose?.();
+          if (Array.isArray(c.material)) c.material.forEach((m: any) => m?.dispose?.());
+          else c.material?.dispose?.();
+        }
+      });
+      scene.remove(obj);
+    }
   }
 
   _send(msg: Record<string, any>): void {

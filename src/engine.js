@@ -620,6 +620,7 @@ const skyDome = new THREE.Mesh(
 skyDome.frustumCulled = false;
 skyDome.renderOrder = -1000;
 skyDome.visible = false;
+skyDome.userData.engineInternal = true;
 scene.add(skyDome);
 
 
@@ -641,6 +642,11 @@ const avatar = new THREE.Mesh(
 avatar.castShadow = false;
 avatar.receiveShadow = false;
 avatar.visible = false; // always hidden; physics capsule handles collision
+avatar.userData.engineInternal = true;
+tagsGroup.userData.engineInternal = true;
+assetsGroup.userData.engineInternal = true;
+primitivesGroup.userData.engineInternal = true;
+lightsGroup.userData.engineInternal = true;
 scene.add(avatar);
 scene.add(tagsGroup);
 scene.add(assetsGroup);
@@ -5570,12 +5576,15 @@ function despawnEphemeralAgents(reason = "task-end") {
   for (const a of doomed) removeAiAgent(a, reason);
 }
 
-function createAiAgent({ ephemeral = false } = {}) {
+function createAiAgent({ ephemeral = false, avatarUrl } = {}) {
   const endpoint = localStorage.getItem("sparkWorldVlmEndpoint") || "/vlm/decision";
   const model = resolveActiveVlmModel();
   const nearbyRange = 2.5;
   const id = `agent-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   let agentRef = null;
+  const _avatarUrl = avatarUrl !== undefined
+    ? avatarUrl
+    : ["/agent-model/unitree_go2.glb", "/agent-model/robot.glb"];
   const agent = new AiAvatar({
     id,
     scene,
@@ -5584,7 +5593,7 @@ function createAiAgent({ ephemeral = false } = {}) {
     getWorldKey: () => worldKey,
     getTags: () => tags,
     getPlayerPosition: () => (Array.isArray(window.__playerPosition) ? window.__playerPosition : [0, 0, 0]),
-    avatarUrl: ["/agent-model/unitree_go2.glb", "/agent-model/robot.glb"],
+    avatarUrl: _avatarUrl,
     senseRadius: 3.0,
     walkSpeed: 2.0,
     // Headless mode in dimos: skip visual rendering, keep colliders for physics
@@ -6261,6 +6270,9 @@ async function importLevelFromJSON(json, options = {}) {
   applySceneRgbBackground();
   syncShadowMapEnabled();
 }
+
+// Exposed for SceneEditor (dimos sticky-save reload via WS setActiveScene).
+window.importLevelFromJSON = importLevelFromJSON;
 
 
 // Sim-mode "Load Level JSON" input (only exists in sim.html)
@@ -7260,7 +7272,12 @@ if (dimosMode) {
       await ensureRapierLoaded();
       // Re-apply grid floor now that rapier is loaded (creates collider)
       spawnPlayerInsideScene();
-      const agent = createAiAgent({ ephemeral: false });
+      const _hasEmbodiment = sceneJson.embodiment != null;
+      const agent = createAiAgent({
+        ephemeral: false,
+        avatarUrl: _hasEmbodiment ? undefined : [],
+      });
+      if (!_hasEmbodiment && agent.group) agent.group.visible = false;
       aiAgents.push(agent);
       // Place agent at a default spawn point
       const spawnPos = sceneJson.dimosSpawnPoint || { x: 2, y: 0.5, z: 3 };
@@ -7616,9 +7633,6 @@ if (dimosMode) {
       // Flush any deferred collider builds first — primitives (floor, walls) may be
       // queued in _pendingColliderBuilds if they were created before the render loop ran.
       flushPendingColliderBuilds();
-      let _snapshotColliders = 0;
-      rapierWorld.colliders.forEach(() => { _snapshotColliders++; });
-      console.log(`[dimos] Flushed collider queue — ${_snapshotColliders} colliders in world before snapshot`);
 
       // Chunked snapshot protocol (DSC1) — single-frame send stalls when the
       // browser main thread is CPU-saturated (e.g. headless SwiftShader on a
@@ -7662,13 +7676,7 @@ if (dimosMode) {
               bridge.wsSensors.send(snapshot.subarray(sent, end));
               sent = end;
               chunkN++;
-              if (sent >= total) {
-                console.log(`[DimosBridge] sent Rapier snapshot (${(total / 1024).toFixed(0)}KB in ${chunkN} chunks) spawn=(${sx.toFixed(1)},${sy.toFixed(1)},${sz.toFixed(1)}) — server physics + lidar active`);
-                return;
-              }
-              if (chunkN % 16 === 0) {
-                console.log(`[DimosBridge] snapshot progress: ${(sent / 1024).toFixed(0)}/${(total / 1024).toFixed(0)}KB (chunk ${chunkN})`);
-              }
+              if (sent >= total) return;
               setTimeout(sendNextChunk, 0); // yield to event loop
             };
             sendNextChunk();

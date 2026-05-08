@@ -3,14 +3,7 @@
   "worldKey": "default",
   "exportedAt": 0,
   "tags": ["empty", "template"],
-  "embodiment": {
-    "avatarUrl": ["/agent-model/unitree_go2.glb", "/agent-model/robot.glb"],
-    "radius": 0.12,
-    "halfHeight": 0.25,
-    "lidarMountHeight": 0.35,
-    "walkSpeed": 2.0,
-    "type": "quadruped"
-  },
+  "embodiment": null,
   "assets": [],
   "primitives": [],
   "lights": [

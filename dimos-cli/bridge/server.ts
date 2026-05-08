@@ -59,6 +59,86 @@ export async function startBridgeServer(options: BridgeServerOptions) {
     sensorRates, sensorEnable, cameraFov,
   } = options;
 
+  // ── Active scene cache (sticky save) ──────────────────────────────────────
+  // Tracks the scene currently considered "active" by the bridge. SceneClient
+  // mutates these via the `setActiveScene` WS message. Browser refresh fetches
+  // /sims/<activeSceneName>.json and the cached content is returned.
+  let activeSceneName: string = scene || "apt";
+  let activeSceneContent: Record<string, any> | null = null;
+
+  function primitiveToColliderDesc(prim: any): Record<string, any> | null {
+    if (!prim || prim.physics === false) return null;
+    const tr = prim.transform ?? {};
+    const pos = tr.position ?? { x: 0, y: 0, z: 0 };
+    const dims = prim.dimensions ?? {};
+    const s = tr.scale ?? { x: 1, y: 1, z: 1 };
+    if (prim.type === "box") {
+      return {
+        shape: "box",
+        position: pos,
+        halfExtents: {
+          x: ((dims.width ?? 1) * (s.x ?? 1)) / 2,
+          y: ((dims.height ?? 1) * (s.y ?? 1)) / 2,
+          z: ((dims.depth ?? 1) * (s.z ?? 1)) / 2,
+        },
+        dynamic: false,
+      };
+    }
+    if (prim.type === "sphere") {
+      const sMax = Math.max(s.x ?? 1, s.y ?? 1, s.z ?? 1);
+      return {
+        shape: "sphere",
+        position: pos,
+        radius: (dims.radius ?? 0.5) * sMax,
+        dynamic: false,
+      };
+    }
+    return null;
+  }
+
+  function syncServerColliders(content: Record<string, any>): void {
+    for (const ch of channelMap.values()) {
+      if (!ch.serverPhysics) continue;
+      ch.serverPhysics.clearUserColliders();
+      for (const prim of content.primitives ?? []) {
+        if (!prim?.id) continue;
+        const desc = primitiveToColliderDesc(prim);
+        if (desc) ch.serverPhysics.addCollider(prim.id, desc);
+      }
+    }
+  }
+
+  function broadcastSceneReload(content: Record<string, any>): void {
+    const msg = JSON.stringify({
+      type: "setActiveScene",
+      name: activeSceneName,
+      content,
+      broadcast: true,
+    });
+    for (const ch of channelMap.values()) {
+      for (const client of ch.controlClients) {
+        if (client.readyState === WebSocket.OPEN) {
+          try { client.send(msg); } catch { /* ignore */ }
+        }
+      }
+    }
+  }
+  // Eager-load the boot scene from disk so /api/active-scene works before
+  // anyone has called setActiveScene. Best-effort: missing file = null cache.
+  // DIMSIM_SCENE_FILE lets dimos point the bridge at a user-authored scene
+  // outside dist/sims/ (e.g. dimos/robot/sim/scenes/warehouse.json).
+  const sceneFileOverride = Deno.env.get("DIMSIM_SCENE_FILE")?.trim();
+  const bootPath = sceneFileOverride && sceneFileOverride.length > 0
+    ? sceneFileOverride
+    : `${distDir}/sims/${activeSceneName}.json`;
+  try {
+    const txt = await Deno.readTextFile(bootPath);
+    activeSceneContent = JSON.parse(txt);
+    if (sceneFileOverride) {
+      console.log(`[bridge] boot scene from DIMSIM_SCENE_FILE: ${bootPath}`);
+    }
+  } catch { /* cache stays null; HTTP fallback to dist/ still works */ }
+
   // Event-loop lag probe — fire setTimeout(0) every 50ms; difference between
   // expected and actual fire time is contention-induced lag. If physics misses
   // ticks, this will show why.
@@ -158,6 +238,43 @@ export async function startBridgeServer(options: BridgeServerOptions) {
     channelMap.set(name, state);
   }
 
+  // Hot-reload: when the active scene's JSON file is edited, push the new
+  // content to browser tabs and resync ServerPhysics colliders. dimos sets
+  // DIMOS_SCENES_DIR to its scenes directory.
+  const scenesWatchDir = Deno.env.get("DIMOS_SCENES_DIR")?.trim();
+  if (scenesWatchDir) {
+    (async () => {
+      try {
+        const watcher = Deno.watchFs(scenesWatchDir);
+        let lastReloadAt = 0;
+        for await (const event of watcher) {
+          if (event.kind !== "modify" && event.kind !== "create") continue;
+          const expected = `${activeSceneName}.json`;
+          const matched = event.paths.find((p) => p.split("/").pop() === expected);
+          if (!matched) continue;
+          // Editors write atomically (temp + rename), often firing two events
+          // ~10ms apart. Debounce so we don't double-reload.
+          const now = performance.now();
+          if (now - lastReloadAt < 250) continue;
+          lastReloadAt = now;
+          try {
+            const txt = await Deno.readTextFile(matched);
+            const content = JSON.parse(txt);
+            activeSceneContent = content;
+            syncServerColliders(content);
+            broadcastSceneReload(content);
+            console.log(`[bridge] hot-reload ${activeSceneName} from ${matched}`);
+          } catch (e) {
+            console.warn(`[bridge] hot-reload parse/read failed: ${e}`);
+          }
+        }
+      } catch (e) {
+        console.warn(`[bridge] DIMOS_SCENES_DIR watcher failed: ${e}`);
+      }
+    })();
+    console.log(`[bridge] watching scenes dir: ${scenesWatchDir}`);
+  }
+
   /** Resolve channel from WS query param. Falls back to default ("") if not found. */
   function resolveChannel(channelParam: string | null): ChannelState {
     if (channelParam && channelMap.has(channelParam)) {
@@ -190,7 +307,8 @@ export async function startBridgeServer(options: BridgeServerOptions) {
       for (const handle of bodiesToRemove) {
         world.removeRigidBody(world.getRigidBody(handle));
       }
-      console.log(`[bridge:${chState.name || "default"}] Rapier snapshot restored (removed ${bodiesToRemove.length} non-fixed bodies)`);
+      // Single canonical "physics live" marker — test fixtures grep for this.
+      console.log(`[bridge:${chState.name || "default"}] ready`);
 
       chState.serverPhysics = new ServerPhysics(chState.lcm, world, RAPIER, chState.sentSeqs, chState.embodiment ?? undefined);
       if (spawnPos) {
@@ -271,7 +389,6 @@ export async function startBridgeServer(options: BridgeServerOptions) {
               for (const p of chunkedSnapshot.parts) { combined.set(p, off); off += p.byteLength; }
               const snapshot = combined.subarray(0, chunkedSnapshot.total);
               const spawn = chunkedSnapshot.spawn;
-              console.log(`${logPrefix} Rapier snapshot received (${(snapshot.byteLength / 1024).toFixed(0)}KB chunked) spawn=(${spawn.x.toFixed(1)},${spawn.y.toFixed(1)},${spawn.z.toFixed(1)})`);
               chunkedSnapshot = null;
               initServerSystems(chState, snapshot, spawn);
             }
@@ -294,7 +411,6 @@ export async function startBridgeServer(options: BridgeServerOptions) {
                 received: 0,
                 parts: [],
               };
-              console.log(`${logPrefix} Rapier snapshot incoming (${(total / 1024).toFixed(0)}KB chunked) spawn=(${sx.toFixed(1)},${sy.toFixed(1)},${sz.toFixed(1)})`);
               return;
             }
 
@@ -303,15 +419,12 @@ export async function startBridgeServer(options: BridgeServerOptions) {
               const sy = dv.getFloat32(8, true);
               const sz = dv.getFloat32(12, true);
               const snapshot = packet.slice(16);
-              const spawnPos = { x: sx, y: sy, z: sz };
-              console.log(`${logPrefix} Rapier snapshot received (${(snapshot.byteLength / 1024).toFixed(0)}KB) spawn=(${sx.toFixed(1)},${sy.toFixed(1)},${sz.toFixed(1)})`);
-              initServerSystems(chState, snapshot, spawnPos);
+              initServerSystems(chState, snapshot, { x: sx, y: sy, z: sz });
               return;
             }
 
             if (magic === SNAPSHOT_MAGIC) { // "DSSN"
               const snapshot = packet.slice(4);
-              console.log(`${logPrefix} Rapier snapshot received (${(snapshot.byteLength / 1024).toFixed(0)}KB) [legacy, no spawn]`);
               initServerSystems(chState, snapshot);
               return;
             }
@@ -372,6 +485,20 @@ export async function startBridgeServer(options: BridgeServerOptions) {
                 // fall through to relay to browser
               }
 
+              // -- Set active scene (sticky save / hot reload from SceneClient) --
+              // Updates the bridge's in-memory active scene so browser refreshes
+              // see the saved content. If broadcast is true, also relay to other
+              // control clients so existing browser tabs hot-reload.
+              if (msg.type === "setActiveScene" && typeof msg.name === "string") {
+                activeSceneName = msg.name;
+                activeSceneContent = msg.content ?? null;
+                console.log(`${logPrefix} active scene set: ${activeSceneName}`);
+                if (!msg.broadcast) {
+                  return; // silent persistence, don't relay
+                }
+                // fall through to relay so browser tabs hot-reload
+              }
+
               // -- Teleport: reposition physics agent, don't relay --
               if (msg.type === "teleport") {
                 if (chState.serverPhysics && msg.x != null && msg.y != null && msg.z != null) {
@@ -381,9 +508,15 @@ export async function startBridgeServer(options: BridgeServerOptions) {
                 return; // don't relay teleport commands
               }
 
-              // -- Physics collider add/remove: forward to Rapier world --
-              if (msg.type === "physicsColliderAdd" || msg.type === "physicsColliderRemove") {
-                // These are handled by the browser's physics; just relay
+              // -- Physics collider add/remove: also apply to ServerPhysics
+              // world so live-authored colliders (floor, walls, dynamic balls)
+              // become real obstacles for the server-side agent. Without this,
+              // the dog falls through anything added after the boot snapshot.
+              if (msg.type === "physicsColliderAdd" && msg.uuid && msg.desc) {
+                chState.serverPhysics?.addCollider(msg.uuid, msg.desc);
+              }
+              if (msg.type === "physicsColliderRemove" && msg.uuid) {
+                chState.serverPhysics?.removeCollider(msg.uuid);
               }
             } catch { /* not JSON, relay as-is */ }
 
@@ -422,11 +555,33 @@ export async function startBridgeServer(options: BridgeServerOptions) {
         const ratesJs = sensorRates ? `window.__dimosSensorRates=${JSON.stringify(sensorRates)};` : "";
         const enableJs = sensorEnable ? `window.__dimosSensorEnable=${JSON.stringify(sensorEnable)};` : "";
         const fovJs = cameraFov ? `window.__dimosCameraFov=${cameraFov};` : "";
-        const inject = `<script>window.__dimosMode=true;window.__dimosScene="${scene || "apt"}";${headless ? "window.__dimosHeadless=true;" : ""}${ratesJs}${enableJs}${fovJs}</script>`;
+        const inject = `<script>window.__dimosMode=true;window.__dimosScene="${activeSceneName}";${headless ? "window.__dimosHeadless=true;" : ""}${ratesJs}${enableJs}${fovJs}</script>`;
         html = html.replace("</head>", `${inject}\n</head>`);
         return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
       } catch {
         return new Response("index.html not found", { status: 404 });
+      }
+    }
+
+    // SceneClient discovery — what scene is the bridge currently serving?
+    if (url.pathname === "/api/active-scene") {
+      return new Response(
+        JSON.stringify({ name: activeSceneName, content: activeSceneContent }),
+        { headers: { "content-type": "application/json; charset=utf-8" } },
+      );
+    }
+
+    // Sticky-save HTTP intercept: if the requested scene matches the cached
+    // active scene, return the in-memory content. This is what makes browser
+    // refresh after `scene.save("warehouse")` show the warehouse — the file
+    // on disk is in dimos's repo, not bridge dist, so the cache is the only
+    // source. Falls through to dist/sims/ for unknown names (built-ins).
+    if (url.pathname.startsWith("/sims/") && url.pathname.endsWith(".json")) {
+      const reqName = url.pathname.slice("/sims/".length, -".json".length);
+      if (reqName === activeSceneName && activeSceneContent != null) {
+        return new Response(JSON.stringify(activeSceneContent), {
+          headers: { "content-type": "application/json; charset=utf-8" },
+        });
       }
     }
 
