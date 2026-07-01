@@ -7289,6 +7289,7 @@ if (dimosMode) {
       // Bridge updates _dimosYaw via this setter when server sends pose
       window.__dimosSetYaw = (yaw) => { _dimosYaw = yaw; };
       agent.update = function(_dt) {
+        this.group.rotation.y = window.__dimosYaw ?? this.group.rotation.y;
         this._syncVisual();
       };
       console.log(`[dimos] Agent spawned: ${agent.id}`);
