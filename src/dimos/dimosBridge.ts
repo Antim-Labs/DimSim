@@ -63,8 +63,14 @@ export interface OdomPose {
 }
 
 export interface SensorSources {
-  captureRgb: () => RgbFrame | null;
-  captureDepth: () => DepthFrame | null;
+  // captureRgb/captureDepth return Promises -- their engine.js
+  // implementations await renderer.readRenderTargetPixelsAsync internally
+  // instead of blocking synchronously (see _publishImages below for why).
+  // captureLidar/getOdomPose are unaffected -- lidar is handled
+  // server-side, and odom pose is a plain synchronous read, not a GPU
+  // readback.
+  captureRgb: () => Promise<RgbFrame | null>;
+  captureDepth: () => Promise<DepthFrame | null>;
   captureLidar: () => LidarFrame | null;
   getOdomPose: () => OdomPose | null;
 }
@@ -301,11 +307,16 @@ export class DimosBridge {
 
   sceneReady = false;
 
+  // In-flight guard for the async image-publish path -- see
+  // _publishImages's comment for why this is needed now that the
+  // underlying capture/readback is async.
+  _imagesInFlight = false;
+
   _startPublishing(): void {
     // No lidar timer — server-side lidar handles it via LCM directly.
     // Images default 5 Hz (configurable via rates.images)
     if (this.rates.images > 0) {
-      this._timers["images"] = setInterval(() => this._publishImages(), this.rates.images);
+      this._timers["images"] = setInterval(() => { void this._publishImages(); }, this.rates.images);
     }
   }
 
@@ -327,11 +338,32 @@ export class DimosBridge {
     this._publishLidarSync(this._makeHeader("world"));
   }
 
-  _publishImages(): void {
+  // _publishRgb/_publishDepth await renderer.readRenderTargetPixelsAsync
+  // internally (see engine.js) instead of blocking synchronously -- a
+  // synchronous readback is a known GPU-pipeline-stalling pattern that
+  // inflated the color/depth pairing_gap dramatically under load. Going
+  // async REMOVES a guarantee the old synchronous code had for free:
+  // since JS is single-threaded, the old sync _publishImages always fully
+  // completed before setInterval could fire again, so overlapping calls
+  // were structurally impossible. That's no longer true once this awaits
+  // -- a new timer tick can now fire while a previous capture is still in
+  // flight, which would kick off a second, overlapping
+  // render-to-the-same-render-target cycle and corrupt whichever readback
+  // is still pending. _imagesInFlight guards against exactly that: a tick
+  // that fires while the previous one hasn't resolved yet is simply
+  // skipped (not queued -- there's no benefit to queuing a capture of a
+  // scene that will have moved on by the time it's serviced anyway).
+  async _publishImages(): Promise<void> {
     if (!this._isSocketOpen(this.wsRgb) && !this._isSocketOpen(this.wsDepth)) return;
-    const camHeader = this._makeHeader("camera_optical");
-    if (this._isSocketOpen(this.wsRgb)) this._publishRgbSync(camHeader);
-    if (this.sensorEnable.depth && this._isSocketOpen(this.wsDepth)) this._publishDepthSync(camHeader);
+    if (this._imagesInFlight) return;
+    this._imagesInFlight = true;
+    try {
+      const camHeader = this._makeHeader("camera_optical");
+      if (this._isSocketOpen(this.wsRgb)) await this._publishRgb(camHeader);
+      if (this.sensorEnable.depth && this._isSocketOpen(this.wsDepth)) await this._publishDepth(camHeader);
+    } finally {
+      this._imagesInFlight = false;
+    }
   }
 
   // -- Odom -------------------------------------------------------------------
@@ -410,10 +442,12 @@ export class DimosBridge {
 
   // -- RGB --------------------------------------------------------------------
 
-  _publishRgbSync(header: any): void {
+  // captureRgb() returns a Promise (see engine.js's
+  // sensorSources.captureRgb), so this awaits it.
+  async _publishRgb(header: any): Promise<void> {
     try {
       if (!this._isSocketOpen(this.wsRgb)) return;
-      const frame = this.sensors.captureRgb();
+      const frame = await this.sensors.captureRgb();
       if (!frame) return;
 
       this._sendSensor(this.wsRgb, CH_IMAGE, new sensor_msgs.Image({
@@ -435,10 +469,12 @@ export class DimosBridge {
 
   _depthU16: Uint16Array | null = null;
 
-  _publishDepthSync(header: any): void {
+  // captureDepth() returns a Promise (see engine.js's
+  // sensorSources.captureDepth / _dimosCaptureDepth), so this awaits it.
+  async _publishDepth(header: any): Promise<void> {
     try {
       if (!this._isSocketOpen(this.wsDepth)) return;
-      const frame = this.sensors.captureDepth();
+      const frame = await this.sensors.captureDepth();
       if (!frame) return;
 
       // Quantize float32 meters → uint16 millimeters (0–65.535m range, 1mm precision)

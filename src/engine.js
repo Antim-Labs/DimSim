@@ -6888,6 +6888,7 @@ function tick() {
   const rawDt = clock.getDelta();
   const physicsDt = Math.min(rawDt, 0.05);
   const motionDt = Math.min(rawDt, 0.02);
+  if (aiAgents.length > 0) console.log("[tick] agents:", aiAgents.length, "rapierWorld:", !!rapierWorld);
 
   updateRapier(physicsDt);
 
@@ -7289,6 +7290,7 @@ if (dimosMode) {
       // Bridge updates _dimosYaw via this setter when server sends pose
       window.__dimosSetYaw = (yaw) => { _dimosYaw = yaw; };
       agent.update = function(_dt) {
+        console.log("[dimos] __dimosYaw:", window.__dimosYaw, "group.rotation.y:", this.group.rotation.y); 
         this.group.rotation.y = window.__dimosYaw ?? this.group.rotation.y;
         this._syncVisual();
       };
@@ -7333,33 +7335,51 @@ if (dimosMode) {
       if (rgbdMetricUsesR32F) _dimosMetricTarget.texture.internalFormat = "R32F";
       _dimosMetricTarget.texture.generateMipmaps = false;
 
-      function _dimosReadMetricDepthFrameMeters() {
+      // Uses readRenderTargetPixelsAsync (WebGL2 PBO-based) rather than the
+      // synchronous renderer.readRenderTargetPixels, which is a known
+      // GPU-pipeline-stalling pattern -- it was the leading cause behind
+      // dimos's observed pairing_gap blowing up from its nominal 200ms/5Hz
+      // design target to several seconds between published frames under
+      // load. Async has the same buffer-fill contract as the sync version
+      // (fills `buffer` in place AND returns it), so callers only need
+      // `await` added, no other change.
+      async function _dimosReadMetricDepthFrameMeters() {
         const w = _dimosMetricTarget.width;
         const h = _dimosMetricTarget.height;
         if (!w || !h) return null;
 
         if (rgbdMetricUsesR32F) {
           const depth = new Float32Array(w * h);
-          renderer.readRenderTargetPixels(_dimosMetricTarget, 0, 0, w, h, depth);
+          await renderer.readRenderTargetPixelsAsync(_dimosMetricTarget, 0, 0, w, h, depth);
           return depth;
         }
 
         if (_dimosMetricTarget.texture.type === THREE.FloatType) {
           const raw = new Float32Array(w * h * 4);
-          renderer.readRenderTargetPixels(_dimosMetricTarget, 0, 0, w, h, raw);
+          await renderer.readRenderTargetPixelsAsync(_dimosMetricTarget, 0, 0, w, h, raw);
           const depth = new Float32Array(w * h);
           for (let i = 0; i < w * h; i++) depth[i] = raw[i * 4 + 0];
           return depth;
         }
 
         const raw = new Uint16Array(w * h * 4);
-        renderer.readRenderTargetPixels(_dimosMetricTarget, 0, 0, w, h, raw);
+        await renderer.readRenderTargetPixelsAsync(_dimosMetricTarget, 0, 0, w, h, raw);
         const depth = new Float32Array(w * h);
         for (let i = 0; i < w * h; i++) depth[i] = halfToFloat(raw[i * 4 + 0]);
         return depth;
       }
 
-      function _dimosCaptureRgb() {
+      // See _dimosReadMetricDepthFrameMeters's comment above for why this
+      // is async. The render itself (setRenderTarget/render/
+      // setRenderTarget back) and all scene-state restoration stay
+      // synchronous and complete BEFORE the async readback starts -- the
+      // render target's contents persist until something renders to it
+      // again, so awaiting the readback afterward is safe as long as
+      // nothing re-renders to _dimosCapTarget before it resolves. That's
+      // guaranteed by dimosBridge.ts's _startPublishing in-flight guard
+      // (only one capture cycle runs at a time), not by anything in this
+      // function itself.
+      async function _dimosCaptureRgb() {
         const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
         const yaw = agent.group?.rotation?.y ?? 0;
         const pitch = typeof agent.pitch === "number" ? agent.pitch : 0;
@@ -7381,7 +7401,7 @@ if (dimosMode) {
         renderer.setRenderTarget(prev);
         if (agent.group) agent.group.visible = prevAgentVisible;
 
-        renderer.readRenderTargetPixels(_dimosCapTarget, 0, 0, _dimosCapW, _dimosCapH, _dimosCapBuf);
+        await renderer.readRenderTargetPixelsAsync(_dimosCapTarget, 0, 0, _dimosCapW, _dimosCapH, _dimosCapBuf);
         // Flip Y — return raw RGBA pixels (no JPEG encode)
         const flipped = new Uint8Array(_dimosCapW * _dimosCapH * 4);
         const rowB = _dimosCapW * 4;
@@ -7391,8 +7411,12 @@ if (dimosMode) {
         return { data: flipped, width: _dimosCapW, height: _dimosCapH };
       }
 
-      // Offscreen depth capture from agent POV using a dedicated low-res target.
-      function _dimosCaptureDepth() {
+      // Offscreen depth capture from agent POV using a dedicated low-res
+      // target. See _dimosReadMetricDepthFrameMeters's comment above; same
+      // safety reasoning as _dimosCaptureRgb (all scene-state restoration
+      // below completes synchronously before the async readback is
+      // awaited).
+      async function _dimosCaptureDepth() {
         const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
         const yaw = agent.group?.rotation?.y ?? 0;
         const pitch = typeof agent.pitch === "number" ? agent.pitch : 0;
@@ -7460,7 +7484,7 @@ if (dimosMode) {
         rgbdMetricMaterial.uniforms.uSpeckleEnabled.value = prevSpeckle;
         renderer.setRenderTarget(null);
 
-        const depthData = _dimosReadMetricDepthFrameMeters();
+        const depthData = await _dimosReadMetricDepthFrameMeters();
         if (!depthData) return null;
 
         const dw = _dimosMetricTarget.width, dh = _dimosMetricTarget.height;
@@ -7572,8 +7596,8 @@ if (dimosMode) {
         rates: window.__dimosSensorRates || undefined,
         sensorEnable: window.__dimosSensorEnable || undefined,
         sensorSources: {
-          captureRgb: () => {
-            const frame = _dimosCaptureRgb();
+          captureRgb: async () => {
+            const frame = await _dimosCaptureRgb();
             if (!frame) return null;
             // Render to canvas → JPEG (used for both LCM publish and eval/sidebar)
             _dimosCapCtx.putImageData(new ImageData(new Uint8ClampedArray(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength), frame.width, frame.height), 0, 0);
